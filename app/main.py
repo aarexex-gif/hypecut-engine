@@ -168,8 +168,8 @@ async def store_youtube_credentials(
         "external_account_id": channel_id,
         "encrypted_access_token": cipher.encrypt(access_token.encode()).decode(),
         "encrypted_refresh_token": cipher.encrypt(refresh_token.encode()).decode(),
-        "expires_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
-            .timestamp() + max(0, expires_in),
+        "expires_at": (__import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+            + __import__("datetime").timedelta(seconds=max(0, expires_in))).isoformat(),
         "scopes": scopes,
     }
     headers = {
