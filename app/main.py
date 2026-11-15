@@ -301,7 +301,8 @@ async def create_clip_job(request: Request, authorization: str | None = Header(d
 
 
 @app.get("/v1/youtube/connect")
-async def youtube_connect(authorization: str | None = Header(default=None)):
+@app.post("/v1/youtube/connect")
+async def youtube_connect(request: Request, authorization: str | None = Header(default=None)):
     token = bearer_token(authorization)
     user = await supabase_auth_user(token)
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
@@ -319,10 +320,10 @@ async def youtube_connect(authorization: str | None = Header(default=None)):
         "include_granted_scopes": "true",
         "state": state,
     }
-    return RedirectResponse(
-        "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params),
-        status_code=302,
-    )
+    authorization_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+    if request.method == "POST":
+        return {"authorization_url": authorization_url}
+    return RedirectResponse(authorization_url, status_code=302)
 
 
 @app.get("/oauth/youtube/callback")
