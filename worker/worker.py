@@ -268,11 +268,13 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
 
 
 async def main() -> None:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise SystemExit("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
     async with httpx.AsyncClient(timeout=60.0) as client:
-        log.info("HYPECUT worker online; id=%s", WORKER_ID)
+        log.info("HYPECUT media worker process started; id=%s", WORKER_ID)
         while True:
+            if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+                log.error("Worker is idle: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured in Railway")
+                await asyncio.sleep(60)
+                continue
             try:
                 job = await claim_job(client)
                 if job:
