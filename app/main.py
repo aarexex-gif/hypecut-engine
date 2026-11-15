@@ -233,6 +233,44 @@ async def current_user(authorization: str | None = Header(default=None)) -> dict
     return {"id": user.get("id"), "email": user.get("email"), "authenticated": True}
 
 
+@app.post("/v1/uploads/sign")
+async def create_upload_url(request: Request, authorization: str | None = Header(default=None)):
+    token = bearer_token(authorization)
+    body = await request.json()
+    filename = body.get("filename") if isinstance(body, dict) else None
+    content_type = body.get("content_type") if isinstance(body, dict) else None
+    allowed = {"video/mp4", "video/quicktime", "video/webm", "video/x-matroska"}
+    if not isinstance(filename, str) or not filename.strip() or content_type not in allowed:
+        raise HTTPException(status_code=400, detail="A filename and supported video content_type are required")
+    user = await supabase_auth_user(token)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename.rsplit("/", 1)[-1])[:120]
+    path = f"{user['id']}/{uuid.uuid4()}-{safe_name}"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            f"{SUPABASE_URL}/storage/v1/object/upload/sign/hypecut-inputs/{path}",
+            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"upsert": False},
+        )
+    if response.status_code in (401, 403):
+        raise HTTPException(status_code=403, detail="Upload permission denied")
+    if response.is_error:
+        raise HTTPException(status_code=502, detail="Could not create secure upload URL")
+    data = response.json()
+    upload_token = data.get("token")
+    if not upload_token:
+        raise HTTPException(status_code=502, detail="Storage did not return an upload token")
+    return {
+        "bucket": "hypecut-inputs",
+        "path": path,
+        "token": upload_token,
+        "upload_url": f"{SUPABASE_URL}/storage/v1/object/upload/sign/hypecut-inputs/{path}?token={upload_token}",
+        "method": "PUT",
+        "content_type": content_type,
+        "max_size_bytes": 1073741824,
+        "next_step": "Upload the file, then register it with POST /v1/sources using platform=upload and this storage_path.",
+    }
+
+
 @app.get("/v1/sources")
 async def list_sources(authorization: str | None = Header(default=None)):
     return await edge_request("GET", "sources", bearer_token(authorization))
