@@ -20,13 +20,21 @@ Implemented:
 - Capability/status endpoint (`GET /v1/capabilities`)
 - Container build configuration
 
+Implemented in code:
+- Authenticated signed-upload URL endpoint for creator-owned video files
+- Private input bucket with per-user storage policies
+- Creator consent records for uploaded sources
+- Atomic queued-job claim RPC restricted to the server service role
+- FFmpeg worker for uploaded media: audio-energy highlight selection, 9:16 rendering, private clip storage
+- Optional OpenAI Whisper SRT captions when an OpenAI API key is configured
+- Signed clip download URLs in the clips listing
+
 Not implemented yet:
-- YouTube OAuth and creator channel verification
-- Live stream or video ingestion
-- Audio/video/chat analysis and moment scoring
-- 9:16 smart reframing and caption generation
-- FFmpeg rendering, clip storage and delivery
-- Background processing queue and worker
+- YouTube live/video media ingestion (YouTube OAuth alone does not expose a general stream-download feed)
+- Creator RTMP contribution / live capture
+- Semantic multimodal AI highlight understanding
+- Live chat reaction analysis and fused scene/audio scoring
+- Full browser dashboard integration and end-to-end creator acceptance test
 
 The API intentionally reports these capabilities as unavailable until they are implemented and tested. It does not fabricate processing status, analytics, or clips.
 
@@ -88,3 +96,14 @@ The client secret, service key, state secret and encryption key must never be pl
 **Important platform limitation:** YouTube OAuth authorizes account access and read-only channel data. It does not provide a general-purpose video stream download endpoint. Actual live video ingestion requires a creator-provided stream feed/RTMP contribution or another permitted source integration. This repository does not scrape or download YouTube streams.
 
 OAuth is not operational until the required Google and Supabase server secrets are configured and a creator grants consent.
+
+## Creator upload workflow
+
+1. Sign in and obtain a Supabase Auth access token.
+2. Call `POST /v1/uploads/sign` with that bearer token and JSON containing `filename` and `content_type`.
+3. Upload the file to the returned `upload_url` using HTTP `PUT` and the returned content type.
+4. Register the uploaded media with `POST /v1/sources`, using `platform: "upload"`, `source_type: "video"`, `storage_path` from the upload response, and `rights_granted: true`.
+5. Create a job with `POST /v1/jobs` and the returned source ID.
+6. The worker claims the job, selects a sustained high-energy audio window, renders a 9:16 MP4 with FFmpeg, and stores it in the private output bucket. This is a signal-based baseline, not semantic AI highlight understanding.
+
+The worker service requires `SUPABASE_SERVICE_ROLE_KEY` in Railway. Optional captions require `OPENAI_API_KEY`. The API's YouTube OAuth flow additionally requires `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET`. Add secrets directly in Railway Variables; never paste them into GitHub or frontend code.
