@@ -252,7 +252,7 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                 "status": "completed", "progress_percent": 100,
                 "start_seconds": start, "end_seconds": end,
                 "hype_score": score, "detection_reason": "Highest sustained audio-energy window",
-                "completed_at": "now()", "worker_locked_at": None, "updated_at": "now()",
+                "completed_at": datetime.now(timezone.utc).isoformat(), "worker_locked_at": None, "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             log.info("Completed clip job %s", job_id)
     except Exception as exc:
@@ -261,7 +261,7 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             await rest_patch(client, "clip_jobs", {"id": f"eq.{job_id}"}, {
                 "status": "failed", "error_code": "worker_processing_failed",
                 "error_message": str(exc)[:1000], "worker_locked_at": None,
-                "updated_at": "now()",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception:
             log.exception("Could not record failure for job %s", job_id)
