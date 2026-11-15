@@ -204,6 +204,7 @@ async def ready() -> ReadinessResponse:
         "oauth_state_secret": bool(OAUTH_STATE_SECRET),
         "credential_encryption": bool(TOKEN_ENCRYPTION_KEY),
         "secure_credential_storage": bool(SUPABASE_SERVICE_ROLE_KEY),
+        "creator_upload_storage": bool(SUPABASE_URL and SUPABASE_ANON_KEY),
     }
     oauth_ready = all(
         configured[k] for k in (
@@ -222,7 +223,7 @@ async def ready() -> ReadinessResponse:
             "youtube_oauth": "configured_but_requires_user_consent" if oauth_ready else "awaiting_server_credentials",
             "youtube_live_video_ingestion": "not_implemented",
             "ai_moment_detection": "not_implemented",
-            "vertical_clip_rendering": "not_implemented",
+            "vertical_clip_rendering": "worker_source_deployed_waiting_for_worker_credentials",
         },
     )
 
@@ -396,13 +397,16 @@ async def capabilities() -> dict[str, Any]:
         "implemented": [
             "health", "readiness", "supabase_access_token_validation",
             "creator_owned_source_registration_proxy", "owner_scoped_source_and_clip_listing",
-            "consent_checked_clip_job_queueing", "youtube_oauth_authorization_flow",
-            "encrypted_youtube_token_persistence_when_secrets_are_configured",
+            "consent_checked_clip_job_queueing", "signed_creator_video_upload_urls",
+            "youtube_oauth_authorization_flow", "encrypted_youtube_token_persistence_when_secrets_are_configured",
+            "ffmpeg_worker_source", "audio_energy_highlight_selection", "vertical_9_by_16_rendering",
+            "private_clip_storage", "signed_clip_download_urls",
+            "optional_openai_whisper_caption_generation",
         ],
         "not_yet_implemented": [
-            "youtube_live_video_ingestion", "video_media_ingestion", "audio_video_chat_analysis",
-            "moment_scoring", "vertical_reframing", "caption_generation",
-            "clip_rendering", "clip_delivery", "background_worker",
+            "youtube_live_video_ingestion", "live_rtmp_ingestion",
+            "semantic_multimodal_ai_highlight_detection", "live_chat_reaction_analysis",
+            "scene_change_and_audio_fusion_scoring", "real_time_stream_monitoring",
         ],
         "rights_policy": "Only creator-owned or explicitly authorised content may be processed.",
     }
