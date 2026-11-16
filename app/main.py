@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+import secrets
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from typing import Any
@@ -631,21 +632,74 @@ async def create_stream_session(request: Request, authorization: str | None = He
     if not broadcast:
         raise HTTPException(status_code=404, detail="The selected broadcast is not live on the connected channel")
     snippet = broadcast.get("snippet") or {}
+    stream_key = secrets.token_urlsafe(32)
+    stream_path = f"hypecut/{uuid.uuid4()}"
+    encrypted_key = token_cipher().encrypt(stream_key.encode()).decode()
     session = await billing_rest("POST", "stream_sessions", payload={
         "user_id": user["id"], "source_id": source_id, "status": "queued",
         "ingest_metadata": {
             "platform": "youtube", "broadcast_id": broadcast_id,
             "live_chat_id": snippet.get("liveChatId"),
             "broadcast_title": snippet.get("title"),
-            "ingest_provider": "awaiting_hypecut_media_ingest",
-            "ingest_transport_status": "not_configured",
+            "ingest_provider": "mediamtx",
+            "ingest_transport_status": "awaiting_service_deployment",
+            "ingest_path": stream_path,
+            "stream_key_sha256": hashlib.sha256(stream_key.encode()).hexdigest(),
+            "stream_key_encrypted": encrypted_key,
         },
     })
+    saved = session[0] if isinstance(session, list) and session else session
+    public_ingest = os.getenv("HYPECUT_RTMP_PUBLIC_URL", "").rstrip("/")
     return {
-        "session": session[0] if isinstance(session, list) and session else session,
-        "video_ingest": "not_yet_available",
-        "next_step": "The YouTube broadcast and chat are verified. HYPECUT's creator-controlled OBS ingest service must be deployed before video analysis can begin.",
+        "session": saved,
+        "video_ingest": "awaiting_service_deployment" if not public_ingest else "ready_for_obs",
+        "rtmp_url": f"{public_ingest}/{stream_path}" if public_ingest else None,
+        "stream_key": stream_key,
+        "stream_key_warning": "Copy this key now. It is shown only once and must be kept private.",
+        "next_step": "Use the RTMP URL and stream key in OBS. HYPECUT will accept the stream once the ingest service is deployed.",
     }
+
+
+@app.post("/v1/ingest/auth")
+async def mediamtx_ingest_auth(request: Request):
+    """MediaMTX external-auth callback; stream keys are never stored in plaintext."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid MediaMTX auth payload")
+    if not isinstance(body, dict) or body.get("action") not in ("publish", "read"):
+        raise HTTPException(status_code=401, detail="Stream action is not allowed")
+    path = body.get("path") or ""
+    if not isinstance(path, str) or not path.startswith("hypecut/"):
+        raise HTTPException(status_code=401, detail="Unknown ingest path")
+    session_tag = path.split("/", 1)[1]
+    try:
+        uuid.UUID(session_tag)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid ingest session")
+    if body.get("protocol") not in ("rtmp", "hls"):
+        raise HTTPException(status_code=401, detail="Unsupported ingest protocol")
+    supplied = body.get("password") or ""
+    if not isinstance(supplied, str) or not supplied:
+        raise HTTPException(status_code=401, detail="Stream key required")
+    rows = await billing_rest("GET", "stream_sessions", params={
+        "id": f"eq.{session_tag}",
+        "select": "id,status,ingest_metadata",
+        "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=401, detail="Ingest session not found")
+    row = rows[0]
+    if row.get("status") not in ("queued", "connecting", "live"):
+        raise HTTPException(status_code=401, detail="Ingest session is not accepting media")
+    metadata = row.get("ingest_metadata") or {}
+    expected = metadata.get("stream_key_sha256") or ""
+    actual = hashlib.sha256(supplied.encode()).hexdigest()
+    if not expected or not hmac.compare_digest(expected, actual):
+        raise HTTPException(status_code=401, detail="Invalid stream key")
+    if body.get("action") == "publish" and body.get("protocol") != "rtmp":
+        raise HTTPException(status_code=401, detail="Only RTMP publishing is enabled")
+    return {"expireAt": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()}
 
 
 @app.post("/v1/streams/{session_id}/end")
