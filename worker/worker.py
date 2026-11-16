@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 import numpy as np
 
+from live_pipeline import process_live_sessions
+
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("hypecut-worker")
 
@@ -278,14 +280,27 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             log.exception("Could not record failure for job %s", job_id)
 
 
+async def live_session_loop(client: httpx.AsyncClient) -> None:
+    while True:
+        try:
+            if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+                await process_live_sessions(client, rest_get, rest_patch, rest_post, upload_file, WORKER_ID)
+        except Exception:
+            log.exception("Live-session monitor cycle failed")
+        await asyncio.sleep(max(3, POLL_SECONDS))
+
+
 async def main() -> None:
     async with httpx.AsyncClient(timeout=60.0) as client:
         log.info("HYPECUT media worker process started; id=%s", WORKER_ID)
+        live_task = None
         while True:
             if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
                 log.error("Worker is idle: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured in Railway")
                 await asyncio.sleep(60)
                 continue
+            if live_task is None:
+                live_task = asyncio.create_task(live_session_loop(client))
             try:
                 job = await claim_job(client)
                 if job:
