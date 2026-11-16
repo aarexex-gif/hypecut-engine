@@ -633,7 +633,6 @@ async def create_stream_session(request: Request, authorization: str | None = He
         raise HTTPException(status_code=404, detail="The selected broadcast is not live on the connected channel")
     snippet = broadcast.get("snippet") or {}
     stream_key = secrets.token_urlsafe(32)
-    stream_path = f"hypecut/{uuid.uuid4()}"
     encrypted_key = token_cipher().encrypt(stream_key.encode()).decode()
     session = await billing_rest("POST", "stream_sessions", payload={
         "user_id": user["id"], "source_id": source_id, "status": "queued",
@@ -643,12 +642,17 @@ async def create_stream_session(request: Request, authorization: str | None = He
             "broadcast_title": snippet.get("title"),
             "ingest_provider": "mediamtx",
             "ingest_transport_status": "awaiting_service_deployment",
-            "ingest_path": stream_path,
             "stream_key_sha256": hashlib.sha256(stream_key.encode()).hexdigest(),
             "stream_key_encrypted": encrypted_key,
         },
     })
     saved = session[0] if isinstance(session, list) and session else session
+    stream_path = f"hypecut/{saved['id']}"
+    metadata = saved.get("ingest_metadata") or {}
+    metadata["ingest_path"] = stream_path
+    await billing_rest("PATCH", "stream_sessions", params={"id": f"eq.{saved['id']}", "user_id": f"eq.{user['id']}"},
+                       payload={"ingest_metadata": metadata, "updated_at": datetime.now(timezone.utc).isoformat()})
+    saved["ingest_metadata"] = metadata
     public_ingest = os.getenv("HYPECUT_RTMP_PUBLIC_URL", "").rstrip("/")
     return {
         "session": saved,
