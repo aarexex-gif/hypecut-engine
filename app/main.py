@@ -676,15 +676,17 @@ async def mediamtx_ingest_auth(request: Request):
     path = body.get("path") or ""
     if not isinstance(path, str) or not path.startswith("hypecut/"):
         raise HTTPException(status_code=401, detail="Unknown ingest path")
-    session_tag = path.split("/", 1)[1]
+    path_parts = path.split("/")
+    if len(path_parts) != 3:
+        raise HTTPException(status_code=401, detail="Ingest path must include a session and stream key")
+    session_tag, supplied = path_parts[1], path_parts[2]
     try:
         uuid.UUID(session_tag)
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid ingest session")
     if body.get("protocol") not in ("rtmp", "hls"):
         raise HTTPException(status_code=401, detail="Unsupported ingest protocol")
-    supplied = body.get("password") or ""
-    if not isinstance(supplied, str) or not supplied:
+    if not supplied or len(supplied) < 32:
         raise HTTPException(status_code=401, detail="Stream key required")
     rows = await billing_rest("GET", "stream_sessions", params={
         "id": f"eq.{session_tag}",
