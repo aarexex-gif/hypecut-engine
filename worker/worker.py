@@ -112,7 +112,10 @@ async def set_progress(client: httpx.AsyncClient, job_id: str, status: str, prog
 def run_ffmpeg(args: list[str]) -> str:
     proc = subprocess.run(args, capture_output=True, text=True, timeout=3600)
     if proc.returncode:
-        raise WorkerError((proc.stderr or "FFmpeg failed")[-2000:])
+        detail = (proc.stderr or "FFmpeg produced no diagnostic output")[-3000:]
+        log.error("FFmpeg exited with return code %s; command=%s; stderr_tail=%s",
+                  proc.returncode, " ".join(args), detail)
+        raise WorkerError(f"FFmpeg exited with return code {proc.returncode}: {detail}")
     return proc.stderr
 
 
@@ -223,14 +226,17 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             captions = await transcribe(client, media, work)
             output = work / "clip.mp4"
             args = [
-                "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(media),
+                "ffmpeg", "-y",
+                "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
+                "-ss", f"{start:.3f}", "-i", str(media),
                 "-t", f"{end-start:.3f}", "-map", "0:v:0", "-map", "0:a?",
                 "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
             ]
             if captions:
                 escaped = str(captions).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
                 args[-1] += f",subtitles='{escaped}'"
-            args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            args += ["-c:v", "libx264", "-threads", "2", "-x264-params", "threads=2",
+                     "-preset", "veryfast", "-crf", "23",
                      "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output)]
             await asyncio.to_thread(run_ffmpeg, args)
             if not output.exists() or output.stat().st_size < 1024:
