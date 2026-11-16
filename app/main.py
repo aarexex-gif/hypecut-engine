@@ -397,6 +397,180 @@ async def youtube_callback(code: str | None = None, state: str | None = None, er
     return finish("connected")
 
 
+
+# Billing: INR launch catalogue. Prices/allowances are configuration defaults, not a
+# claim that checkout is active; Razorpay credentials must be configured first.
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+CREDIT_PACKS = {
+    "starter": {"credits": 25, "amount_paise": 9900, "label": "25 processing credits"},
+    "creator": {"credits": 100, "amount_paise": 29900, "label": "100 processing credits"},
+    "studio": {"credits": 250, "amount_paise": 59900, "label": "250 processing credits"},
+}
+SUBSCRIPTION_PLANS = {
+    "creator": {"amount_paise": 49900, "monthly_credits": 150, "label": "Creator"},
+    "pro": {"amount_paise": 99900, "monthly_credits": 400, "label": "Pro Creator"},
+    "agency": {"amount_paise": 249900, "monthly_credits": 1200, "label": "Agency"},
+}
+
+
+async def billing_rest(method: str, table: str, *, params: dict[str, str] | None = None,
+                       payload: Any = None) -> Any:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=503, detail="Billing database is not configured")
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.request(method, f"{SUPABASE_URL}/rest/v1/{table}",
+                                        params=params, headers=headers, json=payload)
+    if response.is_error:
+        raise HTTPException(status_code=502, detail="Billing database operation failed")
+    return response.json() if response.content else None
+
+
+async def apply_billing_credit(user_id: str, delta: int, entry_type: str,
+                               idempotency_key: str, reference: str | None = None,
+                               description: str | None = None) -> None:
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "p_user_id": user_id, "p_delta": delta, "p_entry_type": entry_type,
+        "p_idempotency_key": idempotency_key, "p_provider_reference": reference,
+        "p_description": description, "p_metadata": {},
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/apply_credit_delta",
+                                     headers=headers, json=payload)
+    if response.is_error:
+        if response.status_code == 400 and "Insufficient credits" in response.text:
+            raise HTTPException(status_code=402, detail="Not enough processing credits")
+        raise HTTPException(status_code=502, detail="Could not update credit balance")
+
+
+def require_razorpay() -> None:
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=503, detail="Payments are not enabled yet")
+
+
+@app.get("/v1/billing/catalog")
+async def billing_catalog():
+    return {
+        "currency": "INR",
+        "market": "India",
+        "subscriptions": SUBSCRIPTION_PLANS,
+        "credit_packs": CREDIT_PACKS,
+        "checkout_enabled": bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET),
+        "note": "Prices and allowances are proposed launch settings and may be adjusted before public sale.",
+    }
+
+
+@app.get("/v1/billing/me")
+async def billing_me(authorization: str | None = Header(default=None)):
+    user = await supabase_auth_user(bearer_token(authorization))
+    uid = user["id"]
+    wallets = await billing_rest("GET", "billing_wallets",
+                                 params={"user_id": f"eq.{uid}", "select": "balance,plan_code,period_credits,period_ends_at"})
+    orders = await billing_rest("GET", "billing_orders",
+                                params={"user_id": f"eq.{uid}", "select": "pack_code,amount_paise,currency,credits,status,created_at,paid_at", "order": "created_at.desc", "limit": "10"})
+    subscriptions = await billing_rest("GET", "billing_subscriptions",
+                                       params={"user_id": f"eq.{uid}", "select": "plan_code,status,current_start,current_end,cancel_at_cycle_end", "order": "created_at.desc", "limit": "1"})
+    wallet = wallets[0] if wallets else {"balance": 0, "plan_code": "free", "period_credits": 0}
+    return {"wallet": wallet, "recent_orders": orders or [],
+            "subscription": subscriptions[0] if subscriptions else None}
+
+
+@app.post("/v1/billing/orders")
+async def create_credit_order(request: Request, authorization: str | None = Header(default=None)):
+    require_razorpay()
+    user = await supabase_auth_user(bearer_token(authorization))
+    body = await request.json()
+    pack_code = body.get("pack_code") if isinstance(body, dict) else None
+    pack = CREDIT_PACKS.get(pack_code)
+    if not pack:
+        raise HTTPException(status_code=400, detail="Choose a valid credit pack")
+    receipt = f"hc_{uuid.uuid4().hex[:24]}"
+    order_payload = {
+        "amount": pack["amount_paise"], "currency": "INR", "receipt": receipt,
+        "notes": {"user_id": user["id"], "pack_code": pack_code, "credits": str(pack["credits"])},
+    }
+    async with httpx.AsyncClient(timeout=20.0, auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) as client:
+        response = await client.post("https://api.razorpay.com/v1/orders", json=order_payload)
+    if response.is_error:
+        raise HTTPException(status_code=502, detail="Payment provider could not create an order")
+    provider_order = response.json()
+    await billing_rest("POST", "billing_orders", payload={
+        "user_id": user["id"], "provider_order_id": provider_order["id"],
+        "pack_code": pack_code, "amount_paise": pack["amount_paise"],
+        "currency": "INR", "credits": pack["credits"], "status": "created",
+    })
+    return {"order_id": provider_order["id"], "amount": pack["amount_paise"],
+            "currency": "INR", "key_id": RAZORPAY_KEY_ID,
+            "credits": pack["credits"], "pack_code": pack_code}
+
+
+@app.post("/v1/billing/orders/verify")
+async def verify_credit_order(request: Request, authorization: str | None = Header(default=None)):
+    require_razorpay()
+    user = await supabase_auth_user(bearer_token(authorization))
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    order_id, payment_id, signature = body.get("razorpay_order_id"), body.get("razorpay_payment_id"), body.get("razorpay_signature")
+    if not all(isinstance(v, str) and v for v in (order_id, payment_id, signature)):
+        raise HTTPException(status_code=400, detail="Payment verification details are required")
+    expected = hmac.new(RAZORPAY_KEY_SECRET.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=400, detail="Payment signature is invalid")
+    rows = await billing_rest("GET", "billing_orders", params={
+        "provider_order_id": f"eq.{order_id}", "user_id": f"eq.{user['id']}",
+        "select": "id,credits,status,amount_paise", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="Payment order not found")
+    order = rows[0]
+    if order["status"] != "paid":
+        # Confirm capture with Razorpay; a valid checkout signature alone is not a capture.
+        async with httpx.AsyncClient(timeout=20.0, auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) as client:
+            payment_response = await client.get(f"https://api.razorpay.com/v1/payments/{payment_id}")
+        if payment_response.is_error:
+            raise HTTPException(status_code=502, detail="Could not confirm payment status")
+        payment = payment_response.json()
+        if payment.get("order_id") != order_id or payment.get("status") != "captured" or payment.get("amount") != order["amount_paise"]:
+            raise HTTPException(status_code=409, detail="Payment has not been captured for this order")
+        await apply_billing_credit(user["id"], order["credits"], "credit_purchase",
+                                   f"purchase:{order_id}", payment_id, "HYPECUT credit pack")
+        await billing_rest("PATCH", "billing_orders",
+                           params={"provider_order_id": f"eq.{order_id}", "user_id": f"eq.{user['id']}"},
+                           payload={"status": "paid", "provider_payment_id": payment_id, "paid_at": "now()"})
+    return {"verified": True, "credits_added": order["credits"]}
+
+
+@app.post("/v1/billing/webhook")
+async def razorpay_billing_webhook(request: Request):
+    if not RAZORPAY_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Payment webhook is not configured")
+    raw = await request.body()
+    signature = request.headers.get("x-razorpay-signature", "")
+    expected = hmac.new(RAZORPAY_WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    if not signature or not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    event = await request.json()
+    event_id = request.headers.get("x-razorpay-event-id")
+    if not event_id:
+        raise HTTPException(status_code=400, detail="Webhook event ID is required")
+    inserted = await billing_rest("POST", "billing_webhook_events",
+                                  payload={"event_id": event_id, "event_type": event.get("event", "unknown"), "payload": event})
+    return {"received": True, "event_id": event_id}
+
+
 @app.get("/v1/capabilities")
 async def capabilities() -> dict[str, Any]:
     return {
