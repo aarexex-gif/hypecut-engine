@@ -19,6 +19,7 @@ from urllib.parse import quote
 import httpx
 
 from live_intelligence import rank_window
+from live_captions import transcribe_srt
 
 log = logging.getLogger("hypecut-live-pipeline")
 HLS_BASE = os.getenv("HYPECUT_HLS_BASE_URL", "").rstrip("/")
@@ -46,13 +47,16 @@ def ffmpeg_capture(playlist: str, output: Path) -> None:
         raise RuntimeError((proc.stderr or "HLS capture failed")[-1800:])
 
 
-def render_vertical(source: Path, output: Path) -> None:
+def render_vertical(source: Path, output: Path, captions: Path | None = None) -> None:
     # Stable center crop fallback. Subject-aware face tracking is a separate
     # enhancement; this does not pretend a single program feed has other angles.
     vf = (
         "scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,setsar=1"
     )
+    if captions and captions.exists():
+        escaped = str(captions).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        vf += f",subtitles='{escaped}':force_style='FontName=Arial,FontSize=18,Outline=2,Shadow=1,Alignment=2,MarginV=240'"
     args = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(source), "-map", "0:v:0", "-map", "0:a?",
@@ -150,7 +154,9 @@ async def process_live_sessions(
                     continue
 
                 output = work / "highlight.mp4"
-                await asyncio.to_thread(render_vertical, captured, output)
+                srt_path = work / "captions.srt"
+                has_captions = await transcribe_srt(captured, srt_path)
+                await asyncio.to_thread(render_vertical, captured, output, srt_path if has_captions else None)
                 if not output.exists() or output.stat().st_size < 12000:
                     raise RuntimeError("Rendered live highlight is empty")
                 storage_path = f"{session['user_id']}/live/{session['id']}/{fingerprint}.mp4"
@@ -162,7 +168,7 @@ async def process_live_sessions(
                     "description": f"{candidate.caption}\n\n{reasons}".strip()[:1500],
                     "storage_path": storage_path,
                     "duration_seconds": round(candidate.end_seconds - candidate.start_seconds, 2),
-                    "aspect_ratio": "9:16", "captions_enabled": False,
+                    "aspect_ratio": "9:16", "captions_enabled": has_captions,
                     "hype_score": candidate.score,
                     "detection_reason": f"Semantic live highlight: {candidate.category}. {reasons}"[:1000],
                     "status": "ready",
