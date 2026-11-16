@@ -707,6 +707,19 @@ async def mediamtx_ingest_auth(request: Request):
         raise HTTPException(status_code=401, detail="Invalid stream key")
     if body.get("action") == "publish" and body.get("protocol") != "rtmp":
         raise HTTPException(status_code=401, detail="Only RTMP publishing is enabled")
+    if body.get("action") == "publish":
+        # Authentication means the publisher is connecting, not yet live.
+        # The worker promotes the session to live only after the HLS playlist appears.
+        metadata["ingest_transport_status"] = "publisher_authenticated"
+        await billing_rest("PATCH", "stream_sessions", params={
+            "id": f"eq.{session_tag}",
+            "status": "in.(queued,connecting,live)",
+        }, payload={
+            "status": "live" if row.get("status") == "live" else "connecting",
+            "ingest_metadata": metadata,
+            "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
     return {"expireAt": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()}
 
 
