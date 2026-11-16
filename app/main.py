@@ -574,7 +574,7 @@ async def youtube_live_chat(
     if stream_session_id and len(messages) >= 5:
         sessions = await billing_rest("GET", "stream_sessions", params={
             "id": f"eq.{stream_session_id}", "user_id": f"eq.{user['id']}",
-            "source_id": f"eq.{broadcast_id}", "select": "id,source_id", "limit": "1",
+            "select": "id,source_id", "limit": "1",
         })
         if sessions:
             await billing_rest("POST", "analysis_events", payload={
