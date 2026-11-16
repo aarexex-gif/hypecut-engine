@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlencode
@@ -228,7 +229,9 @@ async def ready() -> ReadinessResponse:
             "source_registration": "connected_to_supabase_edge_api",
             "clip_job_queue": "connected_to_supabase_edge_api",
             "youtube_oauth": "configured_but_requires_user_consent" if oauth_ready else "awaiting_server_credentials",
-            "youtube_live_video_ingestion": "not_implemented",
+            "youtube_live_video_ingestion": "awaiting_creator_media_ingest_service",
+            "youtube_live_broadcast_discovery": "available_when_oauth_connected",
+            "youtube_live_chat": "official_api_polling_endpoint_implemented",
             "ai_moment_detection": "not_implemented",
             "vertical_clip_rendering": "worker_source_deployed_waiting_for_worker_credentials",
         },
@@ -441,6 +444,217 @@ async def billing_rest(method: str, table: str, *, params: dict[str, str] | None
     if response.is_error:
         raise HTTPException(status_code=502, detail="Billing database operation failed")
     return response.json() if response.content else None
+
+
+async def youtube_access_token(user_id: str) -> str:
+    """Return a valid access token, refreshing it server-side when necessary."""
+    rows = await billing_rest("GET", "provider_credentials", params={
+        "user_id": f"eq.{user_id}", "provider": "eq.youtube",
+        "select": "id,encrypted_access_token,encrypted_refresh_token,expires_at,external_account_id",
+        "order": "updated_at.desc", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=409, detail="Connect your YouTube channel first")
+    row = rows[0]
+    cipher = token_cipher()
+    try:
+        access = cipher.decrypt(row["encrypted_access_token"].encode()).decode()
+        refresh = cipher.decrypt(row["encrypted_refresh_token"].encode()).decode()
+    except (InvalidToken, KeyError, AttributeError):
+        raise HTTPException(status_code=503, detail="Stored YouTube credentials need to be reconnected")
+    expiry = row.get("expires_at")
+    try:
+        expires_at = datetime.fromisoformat(expiry.replace("Z", "+00:00")) if expiry else datetime.min.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        expires_at = datetime.min.replace(tzinfo=timezone.utc)
+    if expires_at > datetime.now(timezone.utc) + timedelta(seconds=90):
+        return access
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": refresh,
+                "grant_type": "refresh_token",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if response.is_error:
+        raise HTTPException(status_code=401, detail="YouTube connection expired; reconnect your channel")
+    data = response.json()
+    access = data.get("access_token")
+    if not access:
+        raise HTTPException(status_code=502, detail="YouTube did not return a refreshed access token")
+    await billing_rest("PATCH", "provider_credentials", params={"id": f"eq.{row['id']}"},
+        payload={
+            "encrypted_access_token": cipher.encrypt(access.encode()).decode(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=int(data.get("expires_in", 3600)))).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+    return access
+
+
+async def youtube_api_get(path: str, access_token: str, params: dict[str, Any]) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        response = await client.get(
+            f"https://www.googleapis.com/youtube/v3/{path}",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if response.status_code in (401, 403):
+        raise HTTPException(status_code=502, detail="YouTube API denied this request; check channel permissions and API quota")
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="The requested YouTube live resource was not found")
+    if response.is_error:
+        raise HTTPException(status_code=502, detail="YouTube API request failed")
+    return response.json()
+
+
+@app.get("/v1/youtube/live")
+async def youtube_live_broadcasts(authorization: str | None = Header(default=None)):
+    user = await supabase_auth_user(bearer_token(authorization))
+    access = await youtube_access_token(user["id"])
+    data = await youtube_api_get("liveBroadcasts", access, {
+        "part": "id,snippet,status,contentDetails",
+        "mine": "true", "broadcastStatus": "active", "maxResults": 50,
+    })
+    items = []
+    for item in data.get("items", []):
+        snippet = item.get("snippet") or {}
+        items.append({
+            "broadcast_id": item.get("id"),
+            "title": snippet.get("title") or "YouTube live stream",
+            "channel_title": snippet.get("channelTitle"),
+            "scheduled_start_time": snippet.get("scheduledStartTime"),
+            "actual_start_time": snippet.get("actualStartTime"),
+            "live_chat_available": bool(snippet.get("liveChatId")),
+            "live_chat_id": snippet.get("liveChatId"),
+            "privacy_status": (item.get("status") or {}).get("privacyStatus"),
+        })
+    return {"items": items, "count": len(items), "source": "youtube_data_api"}
+
+
+@app.get("/v1/youtube/live/{broadcast_id}/chat")
+async def youtube_live_chat(
+    broadcast_id: str,
+    page_token: str | None = None,
+    stream_session_id: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = await supabase_auth_user(bearer_token(authorization))
+    access = await youtube_access_token(user["id"])
+    broadcasts = await youtube_api_get("liveBroadcasts", access, {
+        "part": "id,snippet", "mine": "true", "broadcastStatus": "active", "maxResults": 50,
+    })
+    broadcast = next((item for item in broadcasts.get("items", []) if item.get("id") == broadcast_id), None)
+    if not broadcast:
+        raise HTTPException(status_code=404, detail="Active broadcast not found on the connected channel")
+    live_chat_id = (broadcast.get("snippet") or {}).get("liveChatId")
+    if not live_chat_id:
+        raise HTTPException(status_code=409, detail="This broadcast does not currently expose a live chat")
+    params: dict[str, Any] = {"part": "id,snippet,authorDetails", "liveChatId": live_chat_id, "maxResults": 200}
+    if page_token:
+        params["pageToken"] = page_token
+    data = await youtube_api_get("liveChatMessages", access, params)
+    messages = data.get("items", [])
+    result = {
+        "messages": [{
+            "published_at": (m.get("snippet") or {}).get("publishedAt"),
+            "type": (m.get("snippet") or {}).get("type"),
+            "display_message": (m.get("snippet") or {}).get("displayMessage"),
+            "is_moderator": bool((m.get("authorDetails") or {}).get("isChatModerator")),
+            "is_owner": bool((m.get("authorDetails") or {}).get("isChatOwner")),
+        } for m in messages],
+        "next_page_token": data.get("nextPageToken"),
+        "polling_interval_millis": data.get("pollingIntervalMillis", 5000),
+        "count": len(messages),
+    }
+    # Store only aggregate engagement telemetry, not viewers' message text or identities.
+    if stream_session_id and len(messages) >= 5:
+        sessions = await billing_rest("GET", "stream_sessions", params={
+            "id": f"eq.{stream_session_id}", "user_id": f"eq.{user['id']}",
+            "source_id": f"eq.{broadcast_id}", "select": "id,source_id", "limit": "1",
+        })
+        if sessions:
+            await billing_rest("POST", "analysis_events", payload={
+                "user_id": user["id"], "stream_session_id": stream_session_id,
+                "source_id": sessions[0]["source_id"], "event_type": "chat_spike",
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "score": len(messages),
+                "payload": {"message_count": len(messages), "polling_interval_millis": result["polling_interval_millis"]},
+            })
+    return result
+
+
+@app.get("/v1/streams")
+async def list_stream_sessions(authorization: str | None = Header(default=None)):
+    user = await supabase_auth_user(bearer_token(authorization))
+    rows = await billing_rest("GET", "stream_sessions", params={
+        "user_id": f"eq.{user['id']}",
+        "select": "id,source_id,status,started_at,ended_at,last_heartbeat_at,ingest_metadata,created_at",
+        "order": "created_at.desc", "limit": "50",
+    })
+    return {"items": rows or []}
+
+
+@app.post("/v1/streams")
+async def create_stream_session(request: Request, authorization: str | None = Header(default=None)):
+    user = await supabase_auth_user(bearer_token(authorization))
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    source_id, broadcast_id = body.get("source_id"), body.get("broadcast_id")
+    if not isinstance(source_id, str) or not isinstance(broadcast_id, str):
+        raise HTTPException(status_code=400, detail="source_id and broadcast_id are required")
+    sources = await billing_rest("GET", "sources", params={
+        "id": f"eq.{source_id}", "user_id": f"eq.{user['id']}",
+        "platform": "eq.youtube", "select": "id,user_id,platform,source_url,title,consent_id,status",
+        "limit": "1",
+    })
+    if not sources:
+        raise HTTPException(status_code=404, detail="Authorised YouTube source not found")
+    source = sources[0]
+    if not source.get("consent_id") or source.get("status") not in ("authorised", "monitoring", "pending"):
+        raise HTTPException(status_code=403, detail="Record creator rights consent for this YouTube source before monitoring")
+    consents = await billing_rest("GET", "creator_consents", params={
+        "id": f"eq.{source['consent_id']}", "user_id": f"eq.{user['id']}",
+        "select": "id,rights_granted,revoked_at", "limit": "1",
+    })
+    if not consents or not consents[0].get("rights_granted") or consents[0].get("revoked_at"):
+        raise HTTPException(status_code=403, detail="Creator media rights consent is missing or has been revoked")
+    access = await youtube_access_token(user["id"])
+    broadcasts = await youtube_api_get("liveBroadcasts", access, {
+        "part": "id,snippet", "mine": "true", "broadcastStatus": "active", "maxResults": 50,
+    })
+    broadcast = next((item for item in broadcasts.get("items", []) if item.get("id") == broadcast_id), None)
+    if not broadcast:
+        raise HTTPException(status_code=404, detail="The selected broadcast is not live on the connected channel")
+    snippet = broadcast.get("snippet") or {}
+    session = await billing_rest("POST", "stream_sessions", payload={
+        "user_id": user["id"], "source_id": source_id, "status": "queued",
+        "ingest_metadata": {
+            "platform": "youtube", "broadcast_id": broadcast_id,
+            "live_chat_id": snippet.get("liveChatId"),
+            "broadcast_title": snippet.get("title"),
+            "ingest_provider": "awaiting_hypecut_media_ingest",
+            "ingest_transport_status": "not_configured",
+        },
+    })
+    return {
+        "session": session[0] if isinstance(session, list) and session else session,
+        "video_ingest": "not_yet_available",
+        "next_step": "The YouTube broadcast and chat are verified. HYPECUT's creator-controlled OBS ingest service must be deployed before video analysis can begin.",
+    }
+
+
+@app.post("/v1/streams/{session_id}/end")
+async def end_stream_session(session_id: str, authorization: str | None = Header(default=None)):
+    user = await supabase_auth_user(bearer_token(authorization))
+    rows = await billing_rest("PATCH", "stream_sessions", params={
+        "id": f"eq.{session_id}", "user_id": f"eq.{user['id']}",
+    }, payload={"status": "ended", "ended_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()})
+    return {"updated": bool(rows) if rows is not None else True, "session_id": session_id}
 
 
 async def apply_billing_credit(user_id: str, delta: int, entry_type: str,
