@@ -26,15 +26,17 @@ Implemented in code:
 - Creator consent records for uploaded sources
 - Atomic queued-job claim RPC restricted to the server service role
 - FFmpeg worker for uploaded media: audio-energy highlight selection, 9:16 rendering, private clip storage
+- Live RTMP-to-HLS session polling through the configured MediaMTX HLS endpoint
+- Transcript-led semantic highlight scoring for authorised live ingest windows, with audio/scene signals as supporting evidence
+- 9:16 live clip rendering and optional timestamped Whisper captions for accepted highlights
 - Optional OpenAI Whisper SRT captions when an OpenAI API key is configured
 - Signed clip download URLs in the clips listing
 
 Not implemented yet:
-- YouTube live/video media ingestion (YouTube OAuth alone does not expose a general stream-download feed)
-- Creator RTMP contribution / live capture
-- Semantic multimodal AI highlight understanding
-- Live chat reaction analysis and fused scene/audio scoring
-- Full browser dashboard integration and end-to-end creator acceptance test
+- Arbitrary public YouTube URL media extraction (YouTube OAuth alone does not expose a general stream-download feed)
+- Live chat reaction analysis fused into the live clip score
+- Subject-aware face/speaker tracking and multi-camera angle selection (the current renderer uses a safe center crop for a single program feed)
+- End-to-end acceptance test with an actual RTMP publisher and a configured OpenAI API key
 
 The API intentionally reports these capabilities as unavailable until they are implemented and tested. It does not fabricate processing status, analytics, or clips.
 
@@ -106,4 +108,16 @@ OAuth is not operational until the required Google and Supabase server secrets a
 5. Create a job with `POST /v1/jobs` and the returned source ID.
 6. The worker claims the job, selects a sustained high-energy audio window, renders a 9:16 MP4 with FFmpeg, and stores it in the private output bucket. This is a signal-based baseline, not semantic AI highlight understanding.
 
-The worker service requires `SUPABASE_SERVICE_ROLE_KEY` in Railway. Optional captions require `OPENAI_API_KEY`. The API's YouTube OAuth flow additionally requires `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET`. Add secrets directly in Railway Variables; never paste them into GitHub or frontend code.
+The worker service requires `SUPABASE_SERVICE_ROLE_KEY` and `HYPECUT_HLS_BASE_URL` in Railway. Live semantic ranking and timestamped captions require `OPENAI_API_KEY`; without it, the worker will not produce semantic live clips. Set `HYPECUT_HIGHLIGHT_MODEL` optionally (defaults to `gpt-4o-mini`). The API's YouTube OAuth flow additionally requires `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET`. Add secrets directly in Railway Variables; never paste them into GitHub or frontend code.
+
+
+## Live ingest pipeline (implementation status)
+
+The live worker monitors authorised `stream_sessions` in `connecting` or `live` state, checks that the associated source consent remains valid, reads the session's MediaMTX HLS playlist, captures a bounded 30–60 second window, and evaluates the transcript with an AI highlight judge. Accepted moments are rendered to vertical MP4, stored in the private `hypecut-clips` bucket, and recorded in `clips` and `analysis_events`.
+
+Configure these worker variables in Railway:
+- `HYPECUT_HLS_BASE_URL=https://hypecut-live-ingest-production.up.railway.app`
+- `OPENAI_API_KEY` (required for semantic selection and Whisper captions)
+- `HYPECUT_HIGHLIGHT_MODEL` (optional; default `gpt-4o-mini`)
+
+This is an RTMP contribution workflow: the creator or an authorised operator must send the stream to HYPECUT's RTMP ingest endpoint. It is not an arbitrary YouTube URL downloader. The live worker code has been deployed, but the complete stream-to-clip path still requires a real publisher test and the OpenAI key. Current vertical framing is center-crop; face tracking, true multi-camera selection, and live-chat scoring are not yet implemented.
