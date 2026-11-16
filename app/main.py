@@ -679,6 +679,27 @@ async def mediamtx_ingest_auth(request: Request):
     if not isinstance(path, str) or not path.startswith("hypecut/"):
         raise HTTPException(status_code=401, detail="Unknown ingest path")
     path_parts = path.split("/")
+    if body.get("action") == "read":
+        # The worker reads HLS using a dedicated server-only Basic credential.
+        # Never make HLS playback public or reuse the creator's RTMP publish key.
+        if len(path_parts) != 2 or body.get("protocol") != "hls":
+            raise HTTPException(status_code=401, detail="Invalid HLS read path")
+        session_tag = path_parts[1]
+        try:
+            uuid.UUID(session_tag)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="Invalid ingest session")
+        read_secret = os.getenv("HYPECUT_WORKER_READ_SECRET", "")
+        supplied_secret = str(body.get("password") or "")
+        if (body.get("user") != "hypecut-worker" or not read_secret
+                or not hmac.compare_digest(supplied_secret, read_secret)):
+            raise HTTPException(status_code=401, detail="HLS reader is not authorised")
+        rows = await billing_rest("GET", "stream_sessions", params={
+            "id": f"eq.{session_tag}", "select": "id,status", "limit": "1",
+        })
+        if not rows or rows[0].get("status") not in ("connecting", "live"):
+            raise HTTPException(status_code=401, detail="Live session is not available")
+        return {"expireAt": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}
     if len(path_parts) != 3:
         raise HTTPException(status_code=401, detail="Ingest path must include a session and stream key")
     session_tag, supplied = path_parts[1], path_parts[2]
