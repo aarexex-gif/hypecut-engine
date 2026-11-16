@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 WORKDIR /worker
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY worker.py live_intelligence.py live_pipeline.py ./
+COPY worker.py live_intelligence.py live_pipeline.py live_captions.py ./
 
 ENV PYTHONUNBUFFERED=1
 CMD ["python", "worker.py"]
