@@ -72,14 +72,16 @@ allowed_origins = [
     for origin in os.getenv("CORS_ORIGINS", "").split(",")
     if origin.strip()
 ]
-if allowed_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
-    )
+# The dashboard uses bearer-token authentication (not cross-site cookies).
+# Allow Wix-hosted frontend origins and preflight headers used by mobile browsers.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins or ["https://headless-osivutkraak-aarexex-1407.wix-site-host.com"],
+    allow_origin_regex=r"https://[a-zA-Z0-9-]+\\.wix-site-host\\.com",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def bearer_token(authorization: str | None) -> str:
