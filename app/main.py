@@ -553,6 +553,38 @@ async def verify_credit_order(request: Request, authorization: str | None = Head
     return {"verified": True, "credits_added": order["credits"]}
 
 
+
+@app.post("/v1/billing/subscriptions")
+async def create_billing_subscription(request: Request, authorization: str | None = Header(default=None)):
+    require_razorpay()
+    user = await supabase_auth_user(bearer_token(authorization))
+    body = await request.json()
+    plan_code = body.get("plan_code") if isinstance(body, dict) else None
+    plan = SUBSCRIPTION_PLANS.get(plan_code)
+    plan_id = os.getenv(f"RAZORPAY_PLAN_{str(plan_code).upper()}", "")
+    if not plan or not plan_id:
+        raise HTTPException(status_code=503, detail="This subscription plan is not configured for checkout yet")
+    subscription_payload = {
+        "plan_id": plan_id,
+        "total_count": 120,
+        "quantity": 1,
+        "customer_notify": 1,
+        "notes": {"user_id": user["id"], "plan_code": plan_code},
+    }
+    async with httpx.AsyncClient(timeout=20.0, auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) as client:
+        response = await client.post("https://api.razorpay.com/v1/subscriptions", json=subscription_payload)
+    if response.is_error:
+        raise HTTPException(status_code=502, detail="Payment provider could not create a subscription")
+    provider_sub = response.json()
+    await billing_rest("POST", "billing_subscriptions", payload={
+        "user_id": user["id"], "provider_subscription_id": provider_sub["id"],
+        "provider_plan_id": plan_id, "plan_code": plan_code, "status": provider_sub.get("status", "created"),
+    })
+    return {"subscription_id": provider_sub["id"], "short_url": provider_sub.get("short_url"),
+            "plan_code": plan_code, "amount_paise": plan["amount_paise"],
+            "monthly_credits": plan["monthly_credits"]}
+
+
 @app.post("/v1/billing/webhook")
 async def razorpay_billing_webhook(request: Request):
     if not RAZORPAY_WEBHOOK_SECRET:
@@ -566,10 +598,41 @@ async def razorpay_billing_webhook(request: Request):
     event_id = request.headers.get("x-razorpay-event-id")
     if not event_id:
         raise HTTPException(status_code=400, detail="Webhook event ID is required")
-    inserted = await billing_rest("POST", "billing_webhook_events",
-                                  payload={"event_id": event_id, "event_type": event.get("event", "unknown"), "payload": event})
-    return {"received": True, "event_id": event_id}
-
+    existing = await billing_rest("GET", "billing_webhook_events",
+                                  params={"event_id": f"eq.{event_id}", "select": "event_id", "limit": "1"})
+    if existing:
+        return {"received": True, "duplicate": True, "event_id": event_id}
+    await billing_rest("POST", "billing_webhook_events",
+                       payload={"event_id": event_id, "event_type": event.get("event", "unknown"), "payload": event})
+    event_type = event.get("event")
+    subscription = (event.get("payload") or {}).get("subscription", {}).get("entity", {})
+    payment = (event.get("payload") or {}).get("payment", {}).get("entity", {})
+    if event_type in ("subscription.activated", "subscription.charged") and subscription.get("id"):
+        rows = await billing_rest("GET", "billing_subscriptions", params={
+            "provider_subscription_id": f"eq.{subscription['id']}",
+            "select": "user_id,plan_code,status", "limit": "1",
+        })
+        if rows:
+            sub = rows[0]
+            plan = SUBSCRIPTION_PLANS[sub["plan_code"]]
+            if event_type == "subscription.charged" and payment.get("id"):
+                await apply_billing_credit(sub["user_id"], plan["monthly_credits"], "monthly_grant",
+                                           f"subscription-charge:{payment['id']}", payment["id"],
+                                           f"HYPECUT {sub['plan_code']} monthly credits")
+            await billing_rest("PATCH", "billing_subscriptions",
+                               params={"provider_subscription_id": f"eq.{subscription['id']}"},
+                               payload={"status": subscription.get("status", "active"),
+                                        "current_start": datetime.fromtimestamp(subscription.get("current_start", 0), timezone.utc).isoformat() if subscription.get("current_start") else None,
+                                        "current_end": datetime.fromtimestamp(subscription.get("current_end", 0), timezone.utc).isoformat() if subscription.get("current_end") else None})
+            await billing_rest("PATCH", "billing_wallets",
+                               params={"user_id": f"eq.{sub['user_id']}"},
+                               payload={"plan_code": sub["plan_code"], "period_credits": plan["monthly_credits"],
+                                        "period_ends_at": datetime.fromtimestamp(subscription.get("current_end", 0), timezone.utc).isoformat() if subscription.get("current_end") else None})
+    elif event_type in ("subscription.cancelled", "subscription.halted") and subscription.get("id"):
+        await billing_rest("PATCH", "billing_subscriptions",
+                           params={"provider_subscription_id": f"eq.{subscription['id']}"},
+                           payload={"status": subscription.get("status", "cancelled")})
+    return {"received": True, "event_id": event_id, "event_type": event_type}
 
 @app.get("/v1/capabilities")
 async def capabilities() -> dict[str, Any]:
