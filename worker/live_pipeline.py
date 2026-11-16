@@ -6,6 +6,7 @@ It does not scrape or download arbitrary YouTube URLs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import os
@@ -23,6 +24,7 @@ from live_captions import transcribe_srt
 
 log = logging.getLogger("hypecut-live-pipeline")
 HLS_BASE = os.getenv("HYPECUT_HLS_BASE_URL", "").rstrip("/")
+HLS_READ_SECRET = os.getenv("HYPECUT_WORKER_READ_SECRET", "")
 MIN_SCORE = float(os.getenv("HYPECUT_LIVE_MIN_SCORE", "72"))
 WINDOW_SECONDS = max(30, min(60, int(os.getenv("HYPECUT_LIVE_WINDOW_SECONDS", "60"))))
 
@@ -33,8 +35,11 @@ def utcnow() -> str:
 
 def ffmpeg_capture(playlist: str, output: Path) -> None:
     # Read a bounded live HLS window and remux/transcode to a seekable local file.
-    args = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+    args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    if HLS_READ_SECRET:
+        credential = base64.b64encode(f"hypecut-worker:{HLS_READ_SECRET}".encode()).decode()
+        args += ["-headers", f"Authorization: Basic {credential}\\r\\n"]
+    args += [
         "-i", playlist, "-t", str(WINDOW_SECONDS),
         "-map", "0:v:0", "-map", "0:a?",
         "-vf", "fps=30",
@@ -95,7 +100,7 @@ async def process_live_sessions(
             continue
         playlist = f"{HLS_BASE}/{quote(str(ingest_path), safe='/')}/index.m3u8"
         try:
-            probe = await client.get(playlist, timeout=10)
+            probe = await client.get(playlist, timeout=10, auth=("hypecut-worker", HLS_READ_SECRET) if HLS_READ_SECRET else None)
             if probe.status_code != 200 or "#EXTM3U" not in probe.text:
                 continue
             if session["status"] == "connecting":
