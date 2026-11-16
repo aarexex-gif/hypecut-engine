@@ -20,6 +20,9 @@ SERVICE_NAME = "hypecut-engine"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+# Supabase Free projects have a 50 MB project-wide upload ceiling.
+# Raise this server-side value only after the project plan/global limit is changed.
+MAX_UPLOAD_BYTES = int(os.getenv("HYPECUT_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 EDGE_FUNCTION_URL = f"{SUPABASE_URL}/functions/v1/hypecut-api" if SUPABASE_URL else ""
 GOOGLE_CLIENT_ID = os.getenv("YOUTUBE_CLIENT_ID", "")
@@ -271,7 +274,8 @@ async def create_upload_url(request: Request, authorization: str | None = Header
         "upload_url": f"{SUPABASE_URL}/storage/v1/object/upload/sign/hypecut-inputs/{path}?token={upload_token}",
         "method": "PUT",
         "content_type": content_type,
-        "max_size_bytes": 1073741824,
+        "max_size_bytes": MAX_UPLOAD_BYTES,
+        "max_size_label": f"{MAX_UPLOAD_BYTES / (1024 * 1024):.0f} MB",
         "next_step": "Upload the file, then register it with POST /v1/sources using platform=upload and this storage_path.",
     }
 
