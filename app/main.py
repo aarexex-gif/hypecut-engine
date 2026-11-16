@@ -549,7 +549,7 @@ async def verify_credit_order(request: Request, authorization: str | None = Head
                                    f"purchase:{order_id}", payment_id, "HYPECUT credit pack")
         await billing_rest("PATCH", "billing_orders",
                            params={"provider_order_id": f"eq.{order_id}", "user_id": f"eq.{user['id']}"},
-                           payload={"status": "paid", "provider_payment_id": payment_id, "paid_at": "now()"})
+                           payload={"status": "paid", "provider_payment_id": payment_id, "paid_at": datetime.now(timezone.utc).isoformat()})
     return {"verified": True, "credits_added": order["credits"]}
 
 
