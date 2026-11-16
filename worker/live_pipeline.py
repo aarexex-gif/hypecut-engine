@@ -38,7 +38,7 @@ def ffmpeg_capture(playlist: str, output: Path) -> None:
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     if HLS_READ_SECRET:
         credential = base64.b64encode(f"hypecut-worker:{HLS_READ_SECRET}".encode()).decode()
-        args += ["-headers", f"Authorization: Basic {credential}\\r\\n"]
+        args += ["-headers", f"Authorization: Basic {credential}\r\n"]
     args += [
         "-i", playlist, "-t", str(WINDOW_SECONDS),
         "-map", "0:v:0", "-map", "0:a?",
