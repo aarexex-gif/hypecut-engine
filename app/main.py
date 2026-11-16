@@ -305,7 +305,17 @@ async def create_clip_job(request: Request, authorization: str | None = Header(d
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
-    return await edge_request("POST", "jobs", token, body)
+    user = await supabase_auth_user(token)
+    request_key = body.get("client_request_id") or str(uuid.uuid4())
+    if not isinstance(request_key, str) or not request_key or len(request_key) > 120:
+        raise HTTPException(status_code=400, detail="Invalid client_request_id")
+    await apply_billing_credit(user["id"], -1, "usage", f"clip-job:{user['id']}:{request_key}",
+                               None, "HYPECUT clip processing")
+    result = await edge_request("POST", "jobs", token, body)
+    if result.status_code >= 400:
+        await apply_billing_credit(user["id"], 1, "refund", f"clip-job-refund:{user['id']}:{request_key}",
+                                   None, "Refund for rejected clip job")
+    return result
 
 
 @app.get("/v1/youtube/connect")
@@ -468,6 +478,7 @@ async def billing_catalog():
         "subscriptions": SUBSCRIPTION_PLANS,
         "credit_packs": CREDIT_PACKS,
         "checkout_enabled": bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET),
+        "subscription_checkout_ready": bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and all(os.getenv(f"RAZORPAY_PLAN_{code.upper()}") for code in SUBSCRIPTION_PLANS)),
         "note": "Prices and allowances are proposed launch settings and may be adjusted before public sale.",
     }
 
