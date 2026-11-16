@@ -9,6 +9,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import base64
 import os
 import subprocess
 import tempfile
@@ -151,12 +152,17 @@ async def process_live_sessions(
                     continue
 
                 fingerprint = hashlib.sha256(candidate.transcript.lower().encode("utf-8")).hexdigest()[:24]
+                prior = await rest_get(client, "analysis_events", {
+                    "select": "id", "stream_session_id": f"eq.{session['id']}",
+                    "event_type": "eq.moment_candidate",
+                    "payload->>fingerprint": f"eq.{fingerprint}", "limit": "1",
+                })
+                if prior:
+                    continue
                 latest = await rest_get(client, "stream_sessions", {
                     "select": "ingest_metadata", "id": f"eq.{session['id']}", "limit": "1",
                 })
                 latest_meta = (latest[0].get("ingest_metadata") or {}) if latest else metadata
-                if latest_meta.get("last_candidate_fingerprint") == fingerprint:
-                    continue
 
                 output = work / "highlight.mp4"
                 srt_path = work / "captions.srt"
