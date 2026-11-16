@@ -92,12 +92,16 @@ async def signed_download(client: httpx.AsyncClient, path: str) -> str:
 
 async def upload_file(client: httpx.AsyncClient, bucket: str, path: str, file_path: Path, content_type: str) -> None:
     url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}"
-    with file_path.open("rb") as stream:
-        response = await client.post(
-            url,
-            headers={**headers(), "Content-Type": content_type, "x-upsert": "true"},
-            content=stream,
-        )
+    # httpx.AsyncClient requires async-compatible request content; a normal
+    # file object is a synchronous stream and raises at send time. Read the
+    # rendered MP4 off the event loop, then send its bytes asynchronously.
+    payload = await asyncio.to_thread(file_path.read_bytes)
+    response = await client.post(
+        url,
+        headers={**headers(), "Content-Type": content_type, "x-upsert": "true"},
+        content=payload,
+        timeout=900,
+    )
     response.raise_for_status()
 
 
