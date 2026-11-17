@@ -549,6 +549,25 @@ async def youtube_connection_status(authorization: str | None = Header(default=N
 
 
 
+def youtube_live_state(snippet: dict[str, Any], live: dict[str, Any]) -> str:
+    state = snippet.get("liveBroadcastContent", "none")
+    if state == "live" and live.get("actualStartTime") and not live.get("actualEndTime"):
+        return "live"
+    if state == "upcoming":
+        return "upcoming"
+    return "ended_or_not_live"
+
+
+def chat_activity_level(message_count: int) -> str:
+    if message_count >= 20:
+        return "surge"
+    if message_count >= 8:
+        return "elevated"
+    if message_count > 0:
+        return "normal"
+    return "quiet"
+
+
 def parse_youtube_video_id(value: str) -> str:
     """Accept standard YouTube watch, short, embed, and live URLs."""
     from urllib.parse import urlparse, parse_qs
@@ -608,7 +627,7 @@ async def youtube_agent_inspect(request: Request, authorization: str | None = He
         "channel_id": snippet.get("channelId"),
         "channel_title": snippet.get("channelTitle"),
         "thumbnail_url": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url"),
-        "broadcast_state": "live" if is_live else ("upcoming" if is_upcoming else "ended_or_not_live"),
+        "broadcast_state": broadcast_state,
         "actual_start_time": live.get("actualStartTime"),
         "actual_end_time": live.get("actualEndTime"),
         "concurrent_viewers": live.get("concurrentViewers"),
@@ -657,7 +676,7 @@ async def youtube_agent_chat_pulse(
         "paid_or_membership_event_count": paid_count,
         "polling_interval_millis": interval,
         "next_page_token": data.get("nextPageToken"),
-        "activity_level": "surge" if message_count >= 20 else ("elevated" if message_count >= 8 else ("normal" if message_count else "quiet")),
+        "activity_level": chat_activity_level(message_count),
         "media_access": "not_available_via_youtube_data_api",
         "privacy": "No message text, usernames, channel IDs, or author details are returned or stored.",
     }
