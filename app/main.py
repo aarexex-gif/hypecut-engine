@@ -645,22 +645,76 @@ async def youtube_agent_inspect(request: Request, authorization: str | None = He
 @app.get("/v1/youtube/agent/chat-pulse")
 async def youtube_agent_chat_pulse(
     broadcast_id: str,
+    source_id: str | None = None,
     page_token: str | None = None,
     stream_session_id: str | None = None,
     authorization: str | None = Header(default=None),
 ):
-    """Return privacy-minimised chat activity metrics for the connected creator's own live broadcast."""
+    """Return aggregate chat metrics for an owned broadcast or consented public source."""
     user = await supabase_auth_user(bearer_token(authorization))
     access = await youtube_access_token(user["id"])
+
+    # If a session is supplied, derive its source from the owner-scoped session record.
+    if stream_session_id:
+        sessions = await billing_rest("GET", "stream_sessions", params={
+            "id": f"eq.{stream_session_id}", "user_id": f"eq.{user['id']}",
+            "select": "id,source_id", "limit": "1",
+        })
+        if not sessions:
+            raise HTTPException(status_code=404, detail="Stream session not found")
+        session_source_id = sessions[0]["source_id"]
+        if source_id and source_id != session_source_id:
+            raise HTTPException(status_code=400, detail="The source does not match this stream session")
+        source_id = session_source_id
+
+    source = None
+    if source_id:
+        sources = await billing_rest("GET", "sources", params={
+            "id": f"eq.{source_id}", "user_id": f"eq.{user['id']}",
+            "select": "id,platform,source_type,external_id,source_url,consent_id,status",
+            "limit": "1",
+        })
+        source = sources[0] if sources else None
+        if not source or source.get("platform") != "youtube" or source.get("source_type") != "live":
+            raise HTTPException(status_code=404, detail="Authorised YouTube live source not found")
+        if source.get("external_id") != broadcast_id:
+            try:
+                source_video_id = parse_youtube_video_id(source.get("source_url") or "")
+            except HTTPException:
+                source_video_id = None
+            if source_video_id != broadcast_id:
+                raise HTTPException(status_code=403, detail="This broadcast does not match the registered source")
+        consent_rows = await billing_rest("GET", "creator_consents", params={
+            "id": f"eq.{source['consent_id']}" if source.get("consent_id") else "eq.00000000-0000-0000-0000-000000000000",
+            "user_id": f"eq.{user['id']}", "select": "rights_granted,revoked_at", "limit": "1",
+        })
+        if (source.get("status") not in ("authorised", "monitoring", "pending")
+                or not consent_rows or not consent_rows[0].get("rights_granted")
+                or consent_rows[0].get("revoked_at")):
+            raise HTTPException(status_code=403, detail="Creator media rights consent is missing or revoked")
+
+    # Prefer the connected channel's own broadcast resource. For another creator's
+    # broadcast, resolve its public activeLiveChatId through videos.list; the source
+    # must have an explicit, unrevoked consent record as checked above.
     broadcasts = await youtube_api_get("liveBroadcasts", access, {
         "part": "id,snippet", "mine": "true", "broadcastStatus": "active", "maxResults": 50,
     })
     broadcast = next((item for item in broadcasts.get("items", []) if item.get("id") == broadcast_id), None)
-    if not broadcast:
-        raise HTTPException(status_code=404, detail="Active broadcast not found on the connected channel")
-    live_chat_id = (broadcast.get("snippet") or {}).get("liveChatId")
+    if broadcast:
+        live_chat_id = (broadcast.get("snippet") or {}).get("liveChatId")
+        chat_access_mode = "connected_channel"
+    elif source:
+        videos = await youtube_api_get("videos", access, {
+            "part": "id,snippet,liveStreamingDetails", "id": broadcast_id,
+        })
+        video = next((item for item in videos.get("items", []) if item.get("id") == broadcast_id), None)
+        live_chat_id = ((video or {}).get("liveStreamingDetails") or {}).get("activeLiveChatId")
+        chat_access_mode = "consented_public_broadcast"
+    else:
+        raise HTTPException(status_code=404, detail="Active broadcast not found; register a consented source to inspect another creator's stream")
     if not live_chat_id:
-        raise HTTPException(status_code=409, detail="This broadcast does not currently expose a live chat")
+        raise HTTPException(status_code=409, detail="This broadcast does not currently expose an active live chat")
+
     params: dict[str, Any] = {"part": "id,snippet", "liveChatId": live_chat_id, "maxResults": 200}
     if page_token:
         params["pageToken"] = page_token
@@ -672,6 +726,7 @@ async def youtube_agent_chat_pulse(
     interval = int(data.get("pollingIntervalMillis", 5000))
     pulse = {
         "broadcast_id": broadcast_id,
+        "chat_access_mode": chat_access_mode,
         "message_count": message_count,
         "paid_or_membership_event_count": paid_count,
         "polling_interval_millis": interval,
@@ -680,32 +735,16 @@ async def youtube_agent_chat_pulse(
         "media_access": "not_available_via_youtube_data_api",
         "privacy": "No message text, usernames, channel IDs, or author details are returned or stored.",
     }
-    if stream_session_id and message_count >= 5:
-        sessions = await billing_rest("GET", "stream_sessions", params={
-            "id": f"eq.{stream_session_id}", "user_id": f"eq.{user['id']}",
-            "select": "id,source_id", "limit": "1",
+    if stream_session_id and source and message_count >= 5:
+        await billing_rest("POST", "analysis_events", payload={
+            "user_id": user["id"], "stream_session_id": stream_session_id,
+            "source_id": source["id"], "event_type": "chat_spike",
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "score": message_count,
+            "payload": {"message_count": message_count, "paid_event_count": paid_count,
+                        "polling_interval_millis": interval, "activity_level": pulse["activity_level"],
+                        "chat_access_mode": chat_access_mode},
         })
-        if sessions:
-            sources = await billing_rest("GET", "sources", params={
-                "id": f"eq.{sessions[0]['source_id']}", "user_id": f"eq.{user['id']}",
-                "select": "id,consent_id,status", "limit": "1",
-            })
-            source = sources[0] if sources else None
-            consent_rows = await billing_rest("GET", "creator_consents", params={
-                "id": f"eq.{source['consent_id']}" if source and source.get("consent_id") else "eq.00000000-0000-0000-0000-000000000000",
-                "user_id": f"eq.{user['id']}", "select": "rights_granted,revoked_at", "limit": "1",
-            })
-            if (source and source.get("status") in ("authorised", "monitoring", "pending")
-                    and consent_rows and consent_rows[0].get("rights_granted")
-                    and not consent_rows[0].get("revoked_at")):
-                await billing_rest("POST", "analysis_events", payload={
-                    "user_id": user["id"], "stream_session_id": stream_session_id,
-                    "source_id": source["id"], "event_type": "chat_spike",
-                    "occurred_at": datetime.now(timezone.utc).isoformat(),
-                    "score": message_count,
-                    "payload": {"message_count": message_count, "paid_event_count": paid_count,
-                                "polling_interval_millis": interval, "activity_level": pulse["activity_level"]},
-                })
     return pulse
 
 
