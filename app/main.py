@@ -505,27 +505,58 @@ async def youtube_api_get(path: str, access_token: str, params: dict[str, Any]) 
             params=params,
             headers={"Authorization": f"Bearer {access_token}"},
         )
-    if response.status_code in (401, 403):
-        raise HTTPException(status_code=502, detail="YouTube API denied this request; check channel permissions and API quota")
-    if response.status_code == 404:
-        raise HTTPException(status_code=404, detail="The requested YouTube live resource was not found")
     if response.is_error:
-        raise HTTPException(status_code=502, detail="YouTube API request failed")
+        try:
+            error = response.json().get("error") or {}
+            reasons = [str(item.get("reason", "")) for item in error.get("errors", [])]
+            message = str(error.get("message") or "")
+        except (ValueError, AttributeError):
+            reasons, message = [], ""
+        reason = next((r for r in reasons if r), "unknown")
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail={"code": "youtube_token_rejected", "message": "YouTube rejected the access token. Reconnect the channel."})
+        if response.status_code == 403:
+            if reason in ("quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded"):
+                raise HTTPException(status_code=503, detail={"code": "youtube_quota_exceeded", "message": "YouTube API quota or rate limit reached. Try again later."})
+            if reason in ("insufficientPermissions", "forbidden"):
+                raise HTTPException(status_code=403, detail={"code": "youtube_permission_denied", "message": "The connected Google account does not have permission to read this YouTube resource."})
+            raise HTTPException(status_code=403, detail={"code": "youtube_api_forbidden", "message": message[:240] or "YouTube denied this request.", "reason": reason})
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail={"code": "youtube_resource_not_found", "message": "The requested YouTube live resource was not found."})
+        raise HTTPException(status_code=502, detail={"code": "youtube_api_error", "message": f"YouTube API request failed ({response.status_code})."})
     return response.json()
+
+
+@app.get("/v1/youtube/status")
+async def youtube_connection_status(authorization: str | None = Header(default=None)):
+    user = await supabase_auth_user(bearer_token(authorization))
+    rows = await billing_rest("GET", "provider_credentials", params={
+        "user_id": f"eq.{user['id']}", "provider": "eq.youtube",
+        "select": "external_account_id,expires_at,scopes,updated_at",
+        "order": "updated_at.desc", "limit": "1",
+    })
+    if not rows:
+        return {"connected": False, "channel_id": None, "credential_status": "not_connected"}
+    row = rows[0]
+    return {
+        "connected": True,
+        "channel_id": row.get("external_account_id"),
+        "credential_status": "connected",
+        "expires_at": row.get("expires_at"),
+        "scopes": row.get("scopes") or [],
+    }
 
 
 @app.get("/v1/youtube/live")
 async def youtube_live_broadcasts(authorization: str | None = Header(default=None)):
     user = await supabase_auth_user(bearer_token(authorization))
     access = await youtube_access_token(user["id"])
-    data = await youtube_api_get("liveBroadcasts", access, {
-        "part": "id,snippet,status,contentDetails",
-        "mine": "true", "broadcastStatus": "active", "maxResults": 50,
-    })
-    items = []
-    for item in data.get("items", []):
+    params = {"part": "id,snippet,status,contentDetails", "mine": "true", "maxResults": 50}
+    active_data = await youtube_api_get("liveBroadcasts", access, {**params, "broadcastStatus": "active"})
+    upcoming_data = await youtube_api_get("liveBroadcasts", access, {**params, "broadcastStatus": "upcoming"})
+    def serialize(item: dict[str, Any]) -> dict[str, Any]:
         snippet = item.get("snippet") or {}
-        items.append({
+        return {
             "broadcast_id": item.get("id"),
             "title": snippet.get("title") or "YouTube live stream",
             "channel_title": snippet.get("channelTitle"),
@@ -534,8 +565,16 @@ async def youtube_live_broadcasts(authorization: str | None = Header(default=Non
             "live_chat_available": bool(snippet.get("liveChatId")),
             "live_chat_id": snippet.get("liveChatId"),
             "privacy_status": (item.get("status") or {}).get("privacyStatus"),
-        })
-    return {"items": items, "count": len(items), "source": "youtube_data_api"}
+            "life_cycle_status": (item.get("status") or {}).get("lifeCycleStatus"),
+        }
+    active = [serialize(item) for item in active_data.get("items", [])]
+    upcoming = [serialize(item) for item in upcoming_data.get("items", [])]
+    return {
+        "items": active, "count": len(active), "upcoming_items": upcoming,
+        "upcoming_count": len(upcoming), "source": "youtube_data_api",
+        "discovery_scope": "connected_channel_only",
+        "message": None if active else ("No active livestream found on the connected channel." if not upcoming else "No active livestream; scheduled broadcasts are listed separately."),
+    }
 
 
 @app.get("/v1/youtube/live/{broadcast_id}/chat")
