@@ -183,3 +183,58 @@ def test_public_chat_pulse_rejects_revoked_creator_consent(client, monkeypatch):
         headers={"Authorization": "Bearer test-token"},
     )
     assert response.status_code == 403
+
+
+def test_monitor_enable_requires_unrevoked_creator_consent(client, monkeypatch):
+    async def fake_billing(method, table, *, params=None, payload=None):
+        if method == "GET" and table == "sources":
+            return [{
+                "id": "source-1", "user_id": "user-123", "source_url": "https://youtu.be/abcdefghijk",
+                "external_id": "abcdefghijk", "status": "authorised",
+                "consent_id": "consent-1", "metadata": {},
+            }]
+        if method == "GET" and table == "creator_consents":
+            return [{"rights_granted": True, "revoked_at": "2026-11-17T10:00:00Z"}]
+        raise AssertionError(f"Unexpected operation: {method} {table}")
+
+    monkeypatch.setattr(main, "billing_rest", fake_billing)
+    response = client.post(
+        "/v1/youtube/agent/monitor",
+        headers={"Authorization": "Bearer test-token"},
+        json={"source_id": "source-1", "enabled": True},
+    )
+    assert response.status_code == 403
+
+
+def test_monitor_enable_persists_opt_in_without_exposing_credentials(client, monkeypatch):
+    calls = []
+
+    async def fake_billing(method, table, *, params=None, payload=None):
+        if method == "GET" and table == "sources":
+            return [{
+                "id": "source-1", "user_id": "user-123", "source_url": "https://youtu.be/abcdefghijk",
+                "external_id": "abcdefghijk", "status": "authorised",
+                "consent_id": "consent-1", "metadata": {},
+            }]
+        if method == "GET" and table == "creator_consents":
+            return [{"rights_granted": True, "revoked_at": None}]
+        if method == "PATCH" and table == "sources":
+            calls.append(payload)
+            return []
+        raise AssertionError(f"Unexpected operation: {method} {table}")
+
+    monkeypatch.setattr(main, "billing_rest", fake_billing)
+    response = client.post(
+        "/v1/youtube/agent/monitor",
+        headers={"Authorization": "Bearer test-token"},
+        json={"source_id": "source-1", "enabled": True},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["monitor"]["state"] == "waiting_for_broadcast"
+    assert body["scheduler_enabled"] is False
+    assert len(calls) == 1
+    assert calls[0]["metadata"]["hypecut_monitor"]["enabled"] is True
+    assert "access_token" not in response.text
+    assert "refresh_token" not in response.text
