@@ -110,3 +110,48 @@ def test_timeline_filters_transcripts_and_worker_details(client, monkeypatch):
     assert payload == {"title": "Great moment", "hook": "Watch this"}
     assert "private transcript" not in response.text
     assert "internal-worker" not in response.text
+
+
+def test_chat_pulse_supports_consent_checked_public_broadcast(client, monkeypatch):
+    async def fake_billing(method, table, *, params=None, payload=None):
+        if table == "sources":
+            return [{
+                "id": "source-1",
+                "platform": "youtube",
+                "source_type": "live",
+                "external_id": "abcdefghijk",
+                "source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "consent_id": "consent-1",
+                "status": "authorised",
+            }]
+        if table == "creator_consents":
+            return [{"rights_granted": True, "revoked_at": None}]
+        raise AssertionError(f"Unexpected table: {table}")
+
+    async def fake_youtube(path, _access, params):
+        if path == "liveBroadcasts":
+            return {"items": []}
+        if path == "videos":
+            return {"items": [{
+                "id": "abcdefghijk",
+                "liveStreamingDetails": {"activeLiveChatId": "public-chat-1"},
+            }]}
+        if path == "liveChatMessages":
+            assert params["liveChatId"] == "public-chat-1"
+            return {
+                "items": [{"snippet": {"type": "textMessageEvent"}} for _ in range(4)],
+                "pollingIntervalMillis": 5000,
+            }
+        raise AssertionError(f"Unexpected YouTube resource: {path}")
+
+    monkeypatch.setattr(main, "billing_rest", fake_billing)
+    monkeypatch.setattr(main, "youtube_api_get", fake_youtube)
+    response = client.get(
+        "/v1/youtube/agent/chat-pulse?broadcast_id=abcdefghijk&source_id=source-1",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chat_access_mode"] == "consented_public_broadcast"
+    assert body["message_count"] == 4
+    assert "display_message" not in response.text
