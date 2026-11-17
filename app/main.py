@@ -1253,7 +1253,7 @@ async def capabilities() -> dict[str, Any]:
             "creator_owned_source_registration_proxy", "owner_scoped_source_and_clip_listing",
             "consent_checked_clip_job_queueing", "signed_creator_video_upload_urls",
             "youtube_oauth_authorization_flow", "encrypted_youtube_token_persistence_when_secrets_are_configured",
-            "public_youtube_live_search", "youtube_live_agent_metadata_inspection",\n            "privacy_minimised_owner_live_chat_activity_pulse",
+            "public_youtube_live_search", "youtube_live_agent_metadata_inspection",\n            "privacy_minimised_owner_live_chat_activity_pulse",\n            "owner_scoped_stream_analysis_timeline",
             "deployed_ffmpeg_worker", "semantic_ai_highlight_selection_for_uploads_and_live_ingest",
             "audio_energy_fallback", "vertical_9_by_16_rendering",
             "private_clip_storage", "signed_clip_download_urls",
