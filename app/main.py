@@ -622,6 +622,74 @@ async def youtube_agent_inspect(request: Request, authorization: str | None = He
     }
 
 
+
+@app.get("/v1/youtube/agent/chat-pulse")
+async def youtube_agent_chat_pulse(
+    broadcast_id: str,
+    page_token: str | None = None,
+    stream_session_id: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Return privacy-minimised chat activity metrics for the connected creator's own live broadcast."""
+    user = await supabase_auth_user(bearer_token(authorization))
+    access = await youtube_access_token(user["id"])
+    broadcasts = await youtube_api_get("liveBroadcasts", access, {
+        "part": "id,snippet", "mine": "true", "broadcastStatus": "active", "maxResults": 50,
+    })
+    broadcast = next((item for item in broadcasts.get("items", []) if item.get("id") == broadcast_id), None)
+    if not broadcast:
+        raise HTTPException(status_code=404, detail="Active broadcast not found on the connected channel")
+    live_chat_id = (broadcast.get("snippet") or {}).get("liveChatId")
+    if not live_chat_id:
+        raise HTTPException(status_code=409, detail="This broadcast does not currently expose a live chat")
+    params: dict[str, Any] = {"part": "id,snippet", "liveChatId": live_chat_id, "maxResults": 200}
+    if page_token:
+        params["pageToken"] = page_token
+    data = await youtube_api_get("liveChatMessages", access, params)
+    messages = data.get("items", [])
+    types = [(message.get("snippet") or {}).get("type", "textMessageEvent") for message in messages]
+    paid_count = sum(1 for kind in types if kind in {"superChatEvent", "superStickerEvent", "membershipGiftingEvent", "newSponsorEvent"})
+    message_count = len(messages)
+    interval = int(data.get("pollingIntervalMillis", 5000))
+    pulse = {
+        "broadcast_id": broadcast_id,
+        "message_count": message_count,
+        "paid_or_membership_event_count": paid_count,
+        "polling_interval_millis": interval,
+        "next_page_token": data.get("nextPageToken"),
+        "activity_level": "surge" if message_count >= 20 else ("elevated" if message_count >= 8 else ("normal" if message_count else "quiet")),
+        "media_access": "not_available_via_youtube_data_api",
+        "privacy": "No message text, usernames, channel IDs, or author details are returned or stored.",
+    }
+    if stream_session_id and message_count >= 5:
+        sessions = await billing_rest("GET", "stream_sessions", params={
+            "id": f"eq.{stream_session_id}", "user_id": f"eq.{user['id']}",
+            "select": "id,source_id", "limit": "1",
+        })
+        if sessions:
+            sources = await billing_rest("GET", "sources", params={
+                "id": f"eq.{sessions[0]['source_id']}", "user_id": f"eq.{user['id']}",
+                "select": "id,consent_id,status", "limit": "1",
+            })
+            source = sources[0] if sources else None
+            consent_rows = await billing_rest("GET", "creator_consents", params={
+                "id": f"eq.{source['consent_id']}" if source and source.get("consent_id") else "eq.00000000-0000-0000-0000-000000000000",
+                "user_id": f"eq.{user['id']}", "select": "rights_granted,revoked_at", "limit": "1",
+            })
+            if (source and source.get("status") in ("authorised", "monitoring", "pending")
+                    and consent_rows and consent_rows[0].get("rights_granted")
+                    and not consent_rows[0].get("revoked_at")):
+                await billing_rest("POST", "analysis_events", payload={
+                    "user_id": user["id"], "stream_session_id": stream_session_id,
+                    "source_id": source["id"], "event_type": "chat_spike",
+                    "occurred_at": datetime.now(timezone.utc).isoformat(),
+                    "score": message_count,
+                    "payload": {"message_count": message_count, "paid_event_count": paid_count,
+                                "polling_interval_millis": interval, "activity_level": pulse["activity_level"]},
+                })
+    return pulse
+
+
 @app.get("/v1/youtube/live")
 async def youtube_live_broadcasts(authorization: str | None = Header(default=None)):
     user = await supabase_auth_user(bearer_token(authorization))
