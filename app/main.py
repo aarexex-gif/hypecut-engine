@@ -987,7 +987,18 @@ async def youtube_source_timeline(source_id: str, authorization: str | None = He
                 "message_count", "paid_event_count", "polling_interval_millis",
                 "activity_level") if key in payload},
         })
-    return {"source": sources[0], "events": safe_events, "count": len(safe_events)}
+    raw_source = sources[0]
+    monitor = monitor_metadata(raw_source)
+    safe_source = {
+        "id": raw_source.get("id"), "title": raw_source.get("title"),
+        "status": raw_source.get("status"), "created_at": raw_source.get("created_at"),
+        "monitor": {key: monitor.get(key) for key in (
+            "enabled", "state", "last_polled_at", "next_poll_at", "concurrent_viewers",
+            "last_chat_message_count", "last_paid_event_count", "chat_activity_level",
+            "poll_interval_millis", "last_error_code", "last_error_at",
+        ) if key in monitor},
+    }
+    return {"source": safe_source, "events": safe_events, "count": len(safe_events)}
 
 
 
