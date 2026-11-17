@@ -52,3 +52,21 @@ Creator permission is necessary but is not, by itself, a technical API that supp
 Authenticated endpoint: `GET /v1/streams/{session_id}/timeline`
 
 Returns up to 200 owner-scoped events in chronological order, including highlight candidate markers, chat activity spikes and system events. The API allowlists safe event fields and omits stored transcripts, author details and worker internals.
+
+
+## Persistent monitor (Sprint 03)
+
+The API now includes an opt-in persistent monitor for registered YouTube live sources:
+
+- POST /v1/youtube/agent/monitor with { "source_id": "<source UUID>", "enabled": true } enables monitoring after owner and unrevoked creator-consent checks.
+- Send the same request with enabled: false to stop monitoring.
+- GET /v1/sources/{source_id}/timeline returns owner-scoped aggregate chat-spike events and safe monitor status.
+- The monitor persists its state, poll schedule, and opaque YouTube chat page token in the existing sources.metadata.hypecut_monitor JSON object. It does not persist chat text, author identities, or raw message content.
+- The scheduler checks broadcast metadata and aggregate chat activity, rechecks consent on every cycle, disables monitoring if consent is revoked, and backs off after quota/permission/API errors.
+- Chat activity spikes are stored as analysis_events with source_id; no stream_session_id is required.
+
+### Scheduler deployment gate
+
+The scheduler is deliberately disabled by default. To run it, set HYPECUT_ENABLE_YOUTUBE_MONITOR_SCHEDULER=true on exactly one API replica and optionally set HYPECUT_YOUTUBE_MONITOR_TICK_SECONDS (minimum effective tick: 15 seconds). Do not enable it on multiple replicas: this first version does not yet use a database-backed distributed lease. Keep the setting off until the API branch is reviewed and deployed.
+
+This is metadata/chat monitoring only. It does not access YouTube audiovisual bytes, capture frames/audio, or create clips. Clip rendering still requires a supported authorised video feed.
