@@ -13,6 +13,7 @@ def client(monkeypatch):
     async def fake_access(_user_id):
         return "youtube-access-token"
 
+    monkeypatch.setattr(main, "bearer_token", lambda _authorization: "test-token")
     monkeypatch.setattr(main, "supabase_auth_user", fake_auth)
     monkeypatch.setattr(main, "youtube_access_token", fake_access)
     return TestClient(main.app)
