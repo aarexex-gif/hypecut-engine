@@ -840,6 +840,43 @@ async def youtube_live_chat(
     return result
 
 
+
+@app.get("/v1/streams/{session_id}/timeline")
+async def stream_analysis_timeline(session_id: str, authorization: str | None = Header(default=None)):
+    """Return a safe, owner-scoped event timeline for a HYPECUT stream session."""
+    user = await supabase_auth_user(bearer_token(authorization))
+    sessions = await billing_rest("GET", "stream_sessions", params={
+        "id": f"eq.{session_id}", "user_id": f"eq.{user['id']}",
+        "select": "id,source_id,status,started_at,created_at", "limit": "1",
+    })
+    if not sessions:
+        raise HTTPException(status_code=404, detail="Stream session not found")
+    events = await billing_rest("GET", "analysis_events", params={
+        "stream_session_id": f"eq.{session_id}", "user_id": f"eq.{user['id']}",
+        "event_type": "in.(moment_candidate,chat_spike,system)",
+        "select": "id,event_type,occurred_at,offset_seconds,score,payload",
+        "order": "occurred_at.asc", "limit": "200",
+    })
+    safe_events = []
+    for event in events or []:
+        payload = event.get("payload") or {}
+        safe_payload = {}
+        for key in ("title", "hook", "category", "reasons", "kind", "reason",
+                    "message_count", "paid_event_count", "polling_interval_millis",
+                    "activity_level"):
+            if key in payload:
+                safe_payload[key] = payload[key]
+        safe_events.append({
+            "id": event.get("id"),
+            "type": event.get("event_type"),
+            "occurred_at": event.get("occurred_at"),
+            "offset_seconds": event.get("offset_seconds"),
+            "score": event.get("score"),
+            "payload": safe_payload,
+        })
+    return {"session": sessions[0], "events": safe_events, "count": len(safe_events)}
+
+
 @app.get("/v1/streams")
 async def list_stream_sessions(authorization: str | None = Header(default=None)):
     user = await supabase_auth_user(bearer_token(authorization))
