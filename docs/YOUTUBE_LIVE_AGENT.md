@@ -1,0 +1,72 @@
+# YouTube Live Agent — metadata and chat telemetry
+
+## Current implementation
+
+### Inspect a YouTube URL
+
+Authenticated endpoint: `POST /v1/youtube/agent/inspect`
+
+Request body:
+
+```json
+{"url":"https://www.youtube.com/watch?v=VIDEO_ID"}
+```
+
+Uses the connected account's YouTube OAuth token and official YouTube Data API `videos.list` resource. Returns title, channel, thumbnail, live/upcoming/ended state, broadcast timestamps and concurrent viewers when available.
+
+### Read chat activity pulse
+
+Authenticated endpoint: `GET /v1/youtube/agent/chat-pulse?broadcast_id=...`
+
+Optional query parameters:
+- `page_token`: continue from the API's next page token.
+- `stream_session_id`: attach an aggregate event to an existing HYPECUT session after re-checking source ownership and unrevoked creator consent.
+
+The endpoint supports an active broadcast owned by the connected YouTube account. It can also inspect a public broadcast when the caller supplies a registered YouTube live source with explicit, unrevoked creator consent; the API resolves its active live-chat ID from public video metadata. It returns counts, paid/membership event count, polling interval, next page token and a coarse activity level (quiet/normal/elevated/surge). YouTube may still deny access to a particular chat, for example when chat is disabled or the caller lacks permission. It does not return or store chat text, usernames, channel IDs or author details.
+
+## Important product boundary
+
+These endpoints are metadata and chat telemetry, not a video-watching or clipping agent. YouTube Data API metadata/chat resources do not supply the audiovisual stream. The endpoints intentionally do not scrape the player, extract playback URLs, record browser pixels, or download media. `video_capture_enabled` remains false until a permitted audiovisual access path exists.
+
+Creator permission is necessary but is not, by itself, a technical API that supplies video bytes or overrides platform restrictions.
+
+## Next engineering milestones
+
+1. Add a persisted monitoring job and scheduler to re-check live status with quota-aware backoff.
+2. Convert chat pulses into timestamped candidate markers and ranker features.
+3. Define a pluggable `LiveMediaSource` interface. Keep the existing MediaMTX/HLS implementation as one adapter.
+4. Enable a YouTube media adapter only after a documented, platform-approved audiovisual access method and retention rights are obtained.
+5. Feed timestamped media windows plus engagement features into the existing highlight ranker; render clips only from media the adapter is authorised to provide.
+6. Add integration tests for YouTube API responses, quota handling, consent revocation, and end-to-end clip creation.
+
+## Response state semantics
+
+- `monitoring_metadata`: official metadata currently reports a live broadcast.
+- `waiting_for_broadcast`: metadata reports upcoming.
+- `not_live`: ended, archived, or not currently live.
+- Chat activity levels: `quiet` (0), `normal` (1–7), `elevated` (8–19), `surge` (20+).
+- `media_access`: currently `not_available_via_youtube_data_api` for this adapter.
+
+### Read a HYPECUT session timeline
+
+Authenticated endpoint: `GET /v1/streams/{session_id}/timeline`
+
+Returns up to 200 owner-scoped events in chronological order, including highlight candidate markers, chat activity spikes and system events. The API allowlists safe event fields and omits stored transcripts, author details and worker internals.
+
+
+## Persistent monitor (Sprint 03)
+
+The API now includes an opt-in persistent monitor for registered YouTube live sources:
+
+- POST /v1/youtube/agent/monitor with { "source_id": "<source UUID>", "enabled": true } enables monitoring after owner and unrevoked creator-consent checks.
+- Send the same request with enabled: false to stop monitoring.
+- GET /v1/sources/{source_id}/timeline returns owner-scoped aggregate chat-spike events and safe monitor status.
+- The monitor persists its state, poll schedule, and opaque YouTube chat page token in the existing sources.metadata.hypecut_monitor JSON object. It does not persist chat text, author identities, or raw message content.
+- The scheduler checks broadcast metadata and aggregate chat activity, rechecks consent on every cycle, disables monitoring if consent is revoked, and backs off after quota/permission/API errors.
+- Chat activity spikes are stored as analysis_events with source_id; no stream_session_id is required.
+
+### Scheduler deployment gate
+
+The scheduler is deliberately disabled by default. To run it, set HYPECUT_ENABLE_YOUTUBE_MONITOR_SCHEDULER=true on exactly one API replica and optionally set HYPECUT_YOUTUBE_MONITOR_TICK_SECONDS (minimum effective tick: 15 seconds). Do not enable it on multiple replicas: this first version does not yet use a database-backed distributed lease. Keep the setting off until the API branch is reviewed and deployed.
+
+This is metadata/chat monitoring only. It does not access YouTube audiovisual bytes, capture frames/audio, or create clips. Clip rendering still requires a supported authorised video feed.
