@@ -16,6 +16,7 @@ import httpx
 import numpy as np
 
 from live_pipeline import process_live_sessions
+from live_intelligence import rank_window
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("hypecut-worker")
@@ -168,6 +169,39 @@ def choose_highlight(path: Path, duration: float, clip_length: int) -> tuple[flo
     return start, end, round(score, 1)
 
 
+async def choose_semantic_highlight(media_path: Path, duration: float, work: Path):
+    """Inspect bounded, overlapping excerpts and return the strongest semantic AI moment."""
+    if not OPENAI_API_KEY or duration < 30:
+        return None
+    step = 45
+    last_start = max(0, int(duration) - 60)
+    offsets = list(range(0, last_start + 1, step))
+    if not offsets or offsets[-1] != last_start:
+        offsets.append(last_start)
+    # Bound API cost and processing time for very long uploads.
+    if len(offsets) > 12:
+        indexes = np.linspace(0, len(offsets) - 1, 12).round().astype(int)
+        offsets = [offsets[i] for i in sorted(set(indexes.tolist()))]
+    best = None
+    for index, offset in enumerate(offsets):
+        excerpt = work / f"semantic-window-{index}.mp4"
+        args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{offset:.3f}", "-i", str(media_path), "-t", "60",
+            "-map", "0:v:0", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2",
+            "-c:a", "aac", "-b:a", "96k", str(excerpt),
+        ]
+        try:
+            await asyncio.to_thread(run_ffmpeg, args)
+            candidate = await rank_window(excerpt, float(offset))
+            if candidate and (best is None or candidate.score > best.score):
+                best = candidate
+        finally:
+            excerpt.unlink(missing_ok=True)
+    return best
+
+
 async def transcribe(client: httpx.AsyncClient, media_path: Path, work: Path) -> Path | None:
     if not OPENAI_API_KEY:
         return None
@@ -226,7 +260,17 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                 raise WorkerError("Source video must be at least 30 seconds")
             clip_length = min(60, max(30, int(job.get("target_duration_seconds") or 45)))
             await set_progress(client, job_id, "analysing", 25)
-            start, end, score = await asyncio.to_thread(choose_highlight, media, duration, clip_length)
+            semantic = await choose_semantic_highlight(media, duration, work)
+            if semantic:
+                start, end, score = semantic.start_seconds, semantic.end_seconds, semantic.score
+                clip_title = semantic.title or f"{(source.get('title') or 'HYPECUT highlight')[:140]} — AI highlight"
+                clip_description = (semantic.caption + "\\n\\n" + "; ".join(semantic.reasons)).strip()[:1500]
+                detection_reason = f"Semantic AI highlight: {semantic.category}. " + "; ".join(semantic.reasons)
+            else:
+                start, end, score = await asyncio.to_thread(choose_highlight, media, duration, clip_length)
+                clip_title = f"{(source.get('title') or 'HYPECUT highlight')[:180]} — highlight"
+                clip_description = "Automatically selected using an audio-energy fallback because semantic transcription/ranking was unavailable."
+                detection_reason = "Highest sustained audio-energy window (fallback)"
 
             await set_progress(client, job_id, "rendering", 55)
             captions = await transcribe(client, media, work)
@@ -253,18 +297,18 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             await upload_file(client, OUTPUT_BUCKET, output_path, output, "video/mp4")
             clip = {
                 "user_id": user_id, "source_id": source["id"], "job_id": job_id,
-                "title": f"{(source.get('title') or 'HYPECUT highlight')[:180]} — highlight",
-                "description": "Automatically selected using an audio-energy heuristic. Not a semantic AI highlight score.",
+                "title": clip_title,
+                "description": clip_description,
                 "storage_path": output_path, "duration_seconds": round(end-start, 2),
                 "aspect_ratio": "9:16", "captions_enabled": bool(captions),
-                "hype_score": score, "detection_reason": "Highest sustained audio-energy window",
+                "hype_score": score, "detection_reason": detection_reason[:1000],
                 "status": "ready",
             }
             await rest_post(client, "clips", clip)
             await rest_patch(client, "clip_jobs", {"id": f"eq.{job_id}"}, {
                 "status": "completed", "progress_percent": 100,
                 "start_seconds": start, "end_seconds": end,
-                "hype_score": score, "detection_reason": "Highest sustained audio-energy window",
+                "hype_score": score, "detection_reason": detection_reason[:1000],
                 "completed_at": datetime.now(timezone.utc).isoformat(), "worker_locked_at": None, "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             log.info("Completed clip job %s", job_id)
