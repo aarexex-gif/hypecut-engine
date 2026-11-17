@@ -66,9 +66,9 @@ app = FastAPI(
     title="HYPECUT Engine API",
     description=(
         "Backend for creator-authorised livestream and video clipping. "
-        "Creator source and job records are connected to Supabase. YouTube OAuth "
-        "can be enabled with server-side credentials. Video ingestion, AI analysis, "
-        "and rendering remain unavailable until the media worker is deployed."
+        "Creator source and job records are connected to Supabase. The deployed media "
+        "worker supports authorised RTMP/HLS live ingest, AI highlight analysis, "
+        "creator uploads, and vertical clip rendering."
     ),
     version="0.3.0",
     lifespan=lifespan,
