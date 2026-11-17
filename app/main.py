@@ -616,9 +616,9 @@ async def youtube_agent_inspect(request: Request, authorization: str | None = He
     snippet = item.get("snippet") or {}
     live = item.get("liveStreamingDetails") or {}
     status = item.get("status") or {}
-    life_cycle = snippet.get("liveBroadcastContent", "none")
-    is_live = life_cycle == "live" and bool(live.get("actualStartTime")) and not live.get("actualEndTime")
-    is_upcoming = life_cycle == "upcoming"
+    broadcast_state = youtube_live_state(snippet, live)
+    is_live = broadcast_state == "live"
+    is_upcoming = broadcast_state == "upcoming"
     return {
         "agent_status": "monitoring_metadata" if is_live else ("waiting_for_broadcast" if is_upcoming else "not_live"),
         "video_id": video_id,
