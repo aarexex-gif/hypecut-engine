@@ -46,3 +46,9 @@ Creator permission is necessary but is not, by itself, a technical API that supp
 - `not_live`: ended, archived, or not currently live.
 - Chat activity levels: `quiet` (0), `normal` (1–7), `elevated` (8–19), `surge` (20+).
 - `media_access`: currently `not_available_via_youtube_data_api` for this adapter.
+
+### Read a HYPECUT session timeline
+
+Authenticated endpoint: `GET /v1/streams/{session_id}/timeline`
+
+Returns up to 200 owner-scoped events in chronological order, including highlight candidate markers, chat activity spikes and system events. The API allowlists safe event fields and omits stored transcripts, author details and worker internals.
