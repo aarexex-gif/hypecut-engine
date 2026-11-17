@@ -696,14 +696,7 @@ async def youtube_agent_chat_pulse(
     # Prefer the connected channel's own broadcast resource. For another creator's
     # broadcast, resolve its public activeLiveChatId through videos.list; the source
     # must have an explicit, unrevoked consent record as checked above.
-    broadcasts = await youtube_api_get("liveBroadcasts", access, {
-        "part": "id,snippet", "mine": "true", "broadcastStatus": "active", "maxResults": 50,
-    })
-    broadcast = next((item for item in broadcasts.get("items", []) if item.get("id") == broadcast_id), None)
-    if broadcast:
-        live_chat_id = (broadcast.get("snippet") or {}).get("liveChatId")
-        chat_access_mode = "connected_channel"
-    elif source:
+    if source:
         videos = await youtube_api_get("videos", access, {
             "part": "id,snippet,liveStreamingDetails", "id": broadcast_id,
         })
@@ -711,7 +704,12 @@ async def youtube_agent_chat_pulse(
         live_chat_id = ((video or {}).get("liveStreamingDetails") or {}).get("activeLiveChatId")
         chat_access_mode = "consented_public_broadcast"
     else:
-        raise HTTPException(status_code=404, detail="Active broadcast not found; register a consented source to inspect another creator's stream")
+        broadcasts = await youtube_api_get("liveBroadcasts", access, {
+            "part": "id,snippet", "mine": "true", "broadcastStatus": "active", "maxResults": 50,
+        })
+        broadcast = next((item for item in broadcasts.get("items", []) if item.get("id") == broadcast_id), None)
+        live_chat_id = (broadcast.get("snippet") or {}).get("liveChatId") if broadcast else None
+        chat_access_mode = "connected_channel"
     if not live_chat_id:
         raise HTTPException(status_code=409, detail="This broadcast does not currently expose an active live chat")
 
