@@ -155,3 +155,31 @@ def test_chat_pulse_supports_consent_checked_public_broadcast(client, monkeypatc
     assert body["chat_access_mode"] == "consented_public_broadcast"
     assert body["message_count"] == 4
     assert "display_message" not in response.text
+
+
+def test_public_chat_pulse_rejects_revoked_creator_consent(client, monkeypatch):
+    async def fake_billing(method, table, *, params=None, payload=None):
+        if table == "sources":
+            return [{
+                "id": "source-1",
+                "platform": "youtube",
+                "source_type": "live",
+                "external_id": "abcdefghijk",
+                "source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "consent_id": "consent-1",
+                "status": "authorised",
+            }]
+        if table == "creator_consents":
+            return [{"rights_granted": True, "revoked_at": "2026-11-17T10:00:00Z"}]
+        raise AssertionError(f"Unexpected table: {table}")
+
+    async def should_not_call_youtube(*_args, **_kwargs):
+        raise AssertionError("YouTube API must not be called after consent revocation")
+
+    monkeypatch.setattr(main, "billing_rest", fake_billing)
+    monkeypatch.setattr(main, "youtube_api_get", should_not_call_youtube)
+    response = client.get(
+        "/v1/youtube/agent/chat-pulse?broadcast_id=abcdefghijk&source_id=source-1",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert response.status_code == 403
