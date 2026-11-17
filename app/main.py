@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import hashlib
 import hmac
 import re
@@ -57,9 +58,23 @@ class ReadinessResponse(BaseModel):
     capabilities: dict[str, str]
 
 
+YOUTUBE_MONITOR_TASK: asyncio.Task | None = None
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    yield
+    global YOUTUBE_MONITOR_TASK
+    if os.getenv("HYPECUT_ENABLE_YOUTUBE_MONITOR_SCHEDULER", "false").lower() == "true":
+        YOUTUBE_MONITOR_TASK = asyncio.create_task(youtube_monitor_scheduler())
+    try:
+        yield
+    finally:
+        if YOUTUBE_MONITOR_TASK:
+            YOUTUBE_MONITOR_TASK.cancel()
+            try:
+                await YOUTUBE_MONITOR_TASK
+            except asyncio.CancelledError:
+                pass
+            YOUTUBE_MONITOR_TASK = None
 
 
 app = FastAPI(
@@ -744,6 +759,236 @@ async def youtube_agent_chat_pulse(
                         "chat_access_mode": chat_access_mode},
         })
     return pulse
+
+
+
+
+def monitor_metadata(source: dict[str, Any]) -> dict[str, Any]:
+    metadata = source.get("metadata") or {}
+    monitor = metadata.get("hypecut_monitor") or {}
+    return monitor if isinstance(monitor, dict) else {}
+
+
+async def set_source_monitor(source: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    metadata = source.get("metadata") or {}
+    monitor = metadata.get("hypecut_monitor") or {}
+    monitor.update({
+        "enabled": enabled,
+        "state": "waiting_for_broadcast" if enabled else "stopped",
+        "poll_interval_seconds": 30,
+        "next_poll_at": datetime.now(timezone.utc).isoformat() if enabled else None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    metadata["hypecut_monitor"] = monitor
+    await billing_rest("PATCH", "sources", params={"id": f"eq.{source['id']}", "user_id": f"eq.{source['user_id']}"},
+                       payload={"metadata": metadata, "status": "monitoring" if enabled else source.get("status", "authorised"),
+                                "updated_at": datetime.now(timezone.utc).isoformat()})
+    return monitor
+
+
+@app.post("/v1/youtube/agent/monitor")
+async def youtube_agent_monitor(request: Request, authorization: str | None = Header(default=None)):
+    """Enable or stop persistent metadata/chat monitoring for an authorised YouTube live source."""
+    user = await supabase_auth_user(bearer_token(authorization))
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("source_id"), str):
+        raise HTTPException(status_code=400, detail="source_id is required")
+    enabled = body.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="enabled must be a boolean")
+    rows = await billing_rest("GET", "sources", params={
+        "id": f"eq.{body['source_id']}", "user_id": f"eq.{user['id']}",
+        "platform": "eq.youtube", "source_type": "eq.live",
+        "select": "id,user_id,source_url,external_id,status,consent_id,metadata", "limit": "1",
+    })
+    if not rows:
+        raise HTTPException(status_code=404, detail="YouTube live source not found")
+    source = rows[0]
+    if enabled:
+        if not source.get("consent_id") or source.get("status") not in ("pending", "authorised", "monitoring"):
+            raise HTTPException(status_code=403, detail="Register creator rights consent before monitoring")
+        consents = await billing_rest("GET", "creator_consents", params={
+            "id": f"eq.{source['consent_id']}", "user_id": f"eq.{user['id']}",
+            "select": "rights_granted,revoked_at", "limit": "1",
+        })
+        if not consents or not consents[0].get("rights_granted") or consents[0].get("revoked_at"):
+            raise HTTPException(status_code=403, detail="Creator media rights consent is missing or revoked")
+        await youtube_access_token(user["id"])
+    monitor = await set_source_monitor(source, enabled)
+    return {
+        "source_id": source["id"], "enabled": enabled, "monitor": monitor,
+        "scheduler_enabled": os.getenv("HYPECUT_ENABLE_YOUTUBE_MONITOR_SCHEDULER", "false").lower() == "true",
+        "note": "The scheduler tracks official YouTube metadata and aggregate chat only; it does not capture video or generate clips.",
+    }
+
+
+async def poll_youtube_monitor_source(source: dict[str, Any]) -> None:
+    """One quota-aware monitor cycle. Raw chat text and author identities are never persisted."""
+    user_id = source["user_id"]
+    metadata = source.get("metadata") or {}
+    monitor = monitor_metadata(source)
+    if not monitor.get("enabled"):
+        return
+    now = datetime.now(timezone.utc)
+    next_at = monitor.get("next_poll_at")
+    if next_at:
+        try:
+            if datetime.fromisoformat(next_at.replace("Z", "+00:00")) > now:
+                return
+        except (ValueError, TypeError):
+            pass
+
+    consent_rows = await billing_rest("GET", "creator_consents", params={
+        "id": f"eq.{source.get('consent_id') or '00000000-0000-0000-0000-000000000000'}",
+        "user_id": f"eq.{user_id}", "select": "rights_granted,revoked_at", "limit": "1",
+    })
+    if not consent_rows or not consent_rows[0].get("rights_granted") or consent_rows[0].get("revoked_at"):
+        monitor.update({"enabled": False, "state": "consent_revoked", "next_poll_at": None,
+                        "last_error_code": "consent_revoked", "updated_at": now.isoformat()})
+        metadata["hypecut_monitor"] = monitor
+        await billing_rest("PATCH", "sources", params={"id": f"eq.{source['id']}", "user_id": f"eq.{user_id}"},
+                           payload={"metadata": metadata, "status": "disconnected", "updated_at": now.isoformat()})
+        return
+
+    try:
+        access = await youtube_access_token(user_id)
+        video_id = source.get("external_id")
+        if not video_id:
+            video_id = parse_youtube_video_id(source.get("source_url") or "")
+        video_data = await youtube_api_get("videos", access, {
+            "part": "id,snippet,liveStreamingDetails", "id": video_id,
+        })
+        video = next((item for item in video_data.get("items", []) if item.get("id") == video_id), None)
+        if not video:
+            raise HTTPException(status_code=404, detail="YouTube broadcast is unavailable")
+        snippet = video.get("snippet") or {}
+        live = video.get("liveStreamingDetails") or {}
+        state = youtube_live_state(snippet, live)
+        monitor.update({
+            "state": state, "last_polled_at": now.isoformat(),
+            "next_poll_at": (now + timedelta(seconds=60 if state == "ended_or_not_live" else 30)).isoformat(),
+            "last_error_code": None, "updated_at": now.isoformat(),
+            "title": snippet.get("title"), "channel_title": snippet.get("channelTitle"),
+            "concurrent_viewers": live.get("concurrentViewers"),
+        })
+        event_payload = None
+        chat_id = live.get("activeLiveChatId")
+        if state == "live" and chat_id:
+            params: dict[str, Any] = {"part": "id,snippet", "liveChatId": chat_id, "maxResults": 200}
+            page_token = monitor.get("next_page_token")
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                chat_data = await youtube_api_get("liveChatMessages", access, params)
+            except HTTPException as exc:
+                # An expired/invalid page token is recovered by restarting the chat page once.
+                if page_token and exc.status_code in (400, 404):
+                    params.pop("pageToken", None)
+                    chat_data = await youtube_api_get("liveChatMessages", access, params)
+                else:
+                    raise
+            messages = chat_data.get("items", [])
+            kinds = [(item.get("snippet") or {}).get("type", "textMessageEvent") for item in messages]
+            paid = sum(1 for kind in kinds if kind in {"superChatEvent", "superStickerEvent", "membershipGiftingEvent", "newSponsorEvent"})
+            count = len(messages)
+            next_token = chat_data.get("nextPageToken")
+            monitor.update({
+                "next_page_token": next_token,
+                "poll_interval_millis": int(chat_data.get("pollingIntervalMillis", 5000)),
+                "last_chat_message_count": count,
+                "last_paid_event_count": paid,
+                "chat_activity_level": chat_activity_level(count),
+            })
+            if count >= 8 and next_token and next_token != monitor.get("last_event_page_token"):
+                event_payload = {
+                    "user_id": user_id, "source_id": source["id"], "event_type": "chat_spike",
+                    "occurred_at": now.isoformat(), "score": count,
+                    "payload": {"message_count": count, "paid_event_count": paid,
+                                "activity_level": chat_activity_level(count),
+                                "polling_interval_millis": monitor["poll_interval_millis"],
+                                "kind": "youtube_chat_activity"},
+                }
+                monitor["last_event_page_token"] = next_token
+        metadata["hypecut_monitor"] = monitor
+        await billing_rest("PATCH", "sources", params={"id": f"eq.{source['id']}", "user_id": f"eq.{user_id}"},
+                           payload={"metadata": metadata, "title": snippet.get("title") or source.get("title"),
+                                    "channel_title": snippet.get("channelTitle") or source.get("channel_title"),
+                                    "thumbnail_url": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url") or source.get("thumbnail_url"),
+                                    "status": "monitoring" if state in ("live", "upcoming") else "completed",
+                                    "updated_at": now.isoformat()})
+        if event_payload:
+            await billing_rest("POST", "analysis_events", payload=event_payload)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        monitor.update({"last_error_code": detail.get("code", f"http_{exc.status_code}"),
+                        "last_error_at": now.isoformat(),
+                        "next_poll_at": (now + timedelta(seconds=300 if exc.status_code in (401, 403, 503) else 90)).isoformat(),
+                        "updated_at": now.isoformat()})
+        metadata["hypecut_monitor"] = monitor
+        await billing_rest("PATCH", "sources", params={"id": f"eq.{source['id']}", "user_id": f"eq.{user_id}"},
+                           payload={"metadata": metadata, "updated_at": now.isoformat()})
+    except Exception as exc:
+        monitor.update({"last_error_code": "monitor_cycle_failed",
+                        "last_error_at": now.isoformat(),
+                        "next_poll_at": (now + timedelta(seconds=120)).isoformat(),
+                        "updated_at": now.isoformat()})
+        metadata["hypecut_monitor"] = monitor
+        await billing_rest("PATCH", "sources", params={"id": f"eq.{source['id']}", "user_id": f"eq.{user_id}"},
+                           payload={"metadata": metadata, "updated_at": now.isoformat()})
+        # Keep details in server logs only; never expose tokens or raw chat.
+        import logging
+        logging.getLogger("hypecut-youtube-monitor").warning("Monitor cycle failed: %s", type(exc).__name__)
+
+
+async def youtube_monitor_scheduler() -> None:
+    """Persistent opt-in scheduler. Configure exactly one API replica to run it."""
+    import logging
+    log = logging.getLogger("hypecut-youtube-monitor")
+    while True:
+        try:
+            sources = await billing_rest("GET", "sources", params={
+                "platform": "eq.youtube", "source_type": "eq.live",
+                "status": "in.(pending,authorised,monitoring)",
+                "select": "id,user_id,source_url,external_id,title,channel_title,thumbnail_url,status,consent_id,metadata",
+                "order": "updated_at.asc", "limit": "100",
+            })
+            for source in sources or []:
+                if monitor_metadata(source).get("enabled"):
+                    await poll_youtube_monitor_source(source)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("YouTube monitor scheduler cycle failed: %s", type(exc).__name__)
+        await asyncio.sleep(max(15, int(os.getenv("HYPECUT_YOUTUBE_MONITOR_TICK_SECONDS", "20"))))
+
+
+@app.get("/v1/sources/{source_id}/timeline")
+async def youtube_source_timeline(source_id: str, authorization: str | None = Header(default=None)):
+    user = await supabase_auth_user(bearer_token(authorization))
+    sources = await billing_rest("GET", "sources", params={
+        "id": f"eq.{source_id}", "user_id": f"eq.{user['id']}",
+        "select": "id,title,status,metadata,created_at", "limit": "1",
+    })
+    if not sources:
+        raise HTTPException(status_code=404, detail="Source not found")
+    events = await billing_rest("GET", "analysis_events", params={
+        "source_id": f"eq.{source_id}", "user_id": f"eq.{user['id']}",
+        "select": "id,event_type,occurred_at,score,payload",
+        "order": "occurred_at.desc", "limit": "100",
+    })
+    safe_events = []
+    for event in events or []:
+        payload = event.get("payload") or {}
+        safe_events.append({
+            "id": event.get("id"), "type": event.get("event_type"),
+            "occurred_at": event.get("occurred_at"), "score": event.get("score"),
+            "payload": {key: payload[key] for key in (
+                "title", "hook", "category", "reasons", "kind", "reason",
+                "message_count", "paid_event_count", "polling_interval_millis",
+                "activity_level") if key in payload},
+        })
+    return {"source": sources[0], "events": safe_events, "count": len(safe_events)}
+
 
 
 @app.get("/v1/youtube/live")
