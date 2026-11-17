@@ -22,7 +22,7 @@ Optional query parameters:
 - `page_token`: continue from the API's next page token.
 - `stream_session_id`: attach an aggregate event to an existing HYPECUT session after re-checking source ownership and unrevoked creator consent.
 
-The endpoint only accepts an active broadcast owned by the connected YouTube account. It returns counts, paid/membership event count, polling interval, next page token and a coarse activity level (quiet/normal/elevated/surge). It does not return or store chat text, usernames, channel IDs or author details.
+The endpoint supports an active broadcast owned by the connected YouTube account. It can also inspect a public broadcast when the caller supplies a registered YouTube live source with explicit, unrevoked creator consent; the API resolves its active live-chat ID from public video metadata. It returns counts, paid/membership event count, polling interval, next page token and a coarse activity level (quiet/normal/elevated/surge). YouTube may still deny access to a particular chat, for example when chat is disabled or the caller lacks permission. It does not return or store chat text, usernames, channel IDs or author details.
 
 ## Important product boundary
 
