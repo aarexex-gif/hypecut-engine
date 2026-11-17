@@ -1216,7 +1216,7 @@ async def capabilities() -> dict[str, Any]:
             "creator_owned_source_registration_proxy", "owner_scoped_source_and_clip_listing",
             "consent_checked_clip_job_queueing", "signed_creator_video_upload_urls",
             "youtube_oauth_authorization_flow", "encrypted_youtube_token_persistence_when_secrets_are_configured",
-            "public_youtube_live_search", "youtube_live_agent_metadata_inspection",
+            "public_youtube_live_search", "youtube_live_agent_metadata_inspection",\n            "privacy_minimised_owner_live_chat_activity_pulse",
             "deployed_ffmpeg_worker", "semantic_ai_highlight_selection_for_uploads_and_live_ingest",
             "audio_energy_fallback", "vertical_9_by_16_rendering",
             "private_clip_storage", "signed_clip_download_urls",
@@ -1225,7 +1225,7 @@ async def capabilities() -> dict[str, Any]:
         "not_yet_implemented": [
             "direct_extraction_of_arbitrary_public_youtube_video_streams",
             "authorised_youtube_live_video_capture_adapter",
-            "live_chat_reaction_scoring_in_highlight_ranker", "subject_aware_face_tracking",
+            "live_chat_reaction_scoring_in_highlight_ranker", "persistent_autonomous_youtube_monitor_scheduler",\n            "subject_aware_face_tracking",
         ],
         "rights_policy": "Only creator-owned or explicitly authorised content may be processed.",
     }
