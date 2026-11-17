@@ -548,6 +548,80 @@ async def youtube_connection_status(authorization: str | None = Header(default=N
     }
 
 
+
+def parse_youtube_video_id(value: str) -> str:
+    """Accept standard YouTube watch, short, embed, and live URLs."""
+    from urllib.parse import urlparse, parse_qs
+    raw = value.strip()
+    if not raw or len(raw) > 2048:
+        raise HTTPException(status_code=400, detail="Provide a valid YouTube livestream URL")
+    candidate = raw if "://" in raw else f"https://{raw}"
+    parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower()
+    if host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtube-nocookie.com"}:
+        raise HTTPException(status_code=400, detail="Only YouTube video URLs are supported")
+    video_id = ""
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
+    elif parsed.path == "/watch":
+        video_id = parse_qs(parsed.query).get("v", [""])[0]
+    else:
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2 and parts[0] in {"live", "embed", "shorts", "v"}:
+            video_id = parts[1]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        raise HTTPException(status_code=400, detail="Could not find a valid YouTube video ID in that URL")
+    return video_id
+
+
+@app.post("/v1/youtube/agent/inspect")
+async def youtube_agent_inspect(request: Request, authorization: str | None = Header(default=None)):
+    """Inspect a public YouTube video/live broadcast using official metadata only.
+
+    This endpoint deliberately does not extract, record, or download audiovisual media.
+    """
+    user = await supabase_auth_user(bearer_token(authorization))
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("url"), str):
+        raise HTTPException(status_code=400, detail="JSON body with a YouTube url is required")
+    video_id = parse_youtube_video_id(body["url"])
+    access = await youtube_access_token(user["id"])
+    data = await youtube_api_get("videos", access, {
+        "part": "id,snippet,status,liveStreamingDetails,contentDetails",
+        "id": video_id,
+    })
+    items = data.get("items", [])
+    if not items:
+        raise HTTPException(status_code=404, detail="YouTube video not found or unavailable to this account")
+    item = items[0]
+    snippet = item.get("snippet") or {}
+    live = item.get("liveStreamingDetails") or {}
+    status = item.get("status") or {}
+    life_cycle = snippet.get("liveBroadcastContent", "none")
+    is_live = life_cycle == "live" and bool(live.get("actualStartTime")) and not live.get("actualEndTime")
+    is_upcoming = life_cycle == "upcoming"
+    return {
+        "agent_status": "monitoring_metadata" if is_live else ("waiting_for_broadcast" if is_upcoming else "not_live"),
+        "video_id": video_id,
+        "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+        "title": snippet.get("title") or "YouTube broadcast",
+        "channel_id": snippet.get("channelId"),
+        "channel_title": snippet.get("channelTitle"),
+        "thumbnail_url": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url"),
+        "broadcast_state": "live" if is_live else ("upcoming" if is_upcoming else "ended_or_not_live"),
+        "actual_start_time": live.get("actualStartTime"),
+        "actual_end_time": live.get("actualEndTime"),
+        "concurrent_viewers": live.get("concurrentViewers"),
+        "privacy_status": status.get("privacyStatus"),
+        "media_access": "not_available_via_youtube_data_api",
+        "video_capture_enabled": False,
+        "next_step": (
+            "Metadata monitoring is available. Live video frames/audio are not exposed by this API; "
+            "clip production remains disabled until an approved audiovisual access method is configured."
+        ),
+    }
+
+
 @app.get("/v1/youtube/live")
 async def youtube_live_broadcasts(authorization: str | None = Header(default=None)):
     user = await supabase_auth_user(bearer_token(authorization))
