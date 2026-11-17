@@ -577,6 +577,55 @@ async def youtube_live_broadcasts(authorization: str | None = Header(default=Non
     }
 
 
+@app.get("/v1/youtube/discover")
+async def youtube_discover_live(
+    q: str = "GTA 6",
+    max_results: int = 25,
+    authorization: str | None = Header(default=None),
+):
+    """Search public live gaming broadcasts; discovery does not grant media-processing rights."""
+    query = q.strip()
+    if len(query) < 2 or len(query) > 100:
+        raise HTTPException(status_code=400, detail="Search query must be between 2 and 100 characters")
+    if max_results < 1 or max_results > 50:
+        raise HTTPException(status_code=400, detail="max_results must be between 1 and 50")
+    user = await supabase_auth_user(bearer_token(authorization))
+    access = await youtube_access_token(user["id"])
+    data = await youtube_api_get("search", access, {
+        "part": "snippet",
+        "type": "video",
+        "eventType": "live",
+        "videoCategoryId": "20",
+        "order": "viewCount",
+        "q": query,
+        "maxResults": max_results,
+    })
+    items = []
+    for item in data.get("items", []):
+        video_id = (item.get("id") or {}).get("videoId")
+        snippet = item.get("snippet") or {}
+        if not video_id:
+            continue
+        items.append({
+            "video_id": video_id,
+            "title": snippet.get("title") or "Live gaming stream",
+            "channel_id": snippet.get("channelId"),
+            "channel_title": snippet.get("channelTitle"),
+            "published_at": snippet.get("publishedAt"),
+            "thumbnail_url": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url"),
+            "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+            "discovery_only": True,
+            "processing_requires_creator_authorization": True,
+        })
+    return {
+        "items": items,
+        "count": len(items),
+        "query": query,
+        "source": "youtube_data_api_search",
+        "notice": "Public live streams can be discovered, but HYPECUT cannot ingest or clip another creator's YouTube playback directly. The creator must authorise processing and provide an ingest feed.",
+    }
+
+
 @app.get("/v1/youtube/live/{broadcast_id}/chat")
 async def youtube_live_chat(
     broadcast_id: str,
