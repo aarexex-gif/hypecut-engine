@@ -294,7 +294,6 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                         candidates.append(candidate)
                     if len(candidates) >= 3:
                         break
-                candidates.sort(key=lambda item: item[0])
             else:
                 candidates = await asyncio.to_thread(choose_highlights, media, duration, clip_length, 3)
                 semantic_title = None
