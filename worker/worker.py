@@ -205,7 +205,7 @@ def semantic_window_offsets(duration: float, window_seconds: int = 60, step_seco
     return offsets
 
 
-async def choose_semantic_highlight(media_path: Path, duration: float, work: Path):
+async def choose_semantic_highlight(media_path: Path, duration: float, work: Path, on_progress=None):
     """Review every overlapping source window and return the strongest semantic moment."""
     if not OPENAI_API_KEY or duration < 30:
         return None
@@ -230,6 +230,8 @@ async def choose_semantic_highlight(media_path: Path, duration: float, work: Pat
                 best = candidate
         finally:
             excerpt.unlink(missing_ok=True)
+        if on_progress and ((index + 1) % 5 == 0 or index + 1 == len(offsets)):
+            await on_progress(index + 1, len(offsets))
     return best
 
 
@@ -301,7 +303,14 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                 raise WorkerError("Source video must be at least 30 seconds")
             clip_length = min(60, max(30, int(job.get("target_duration_seconds") or 45)))
             await set_progress(client, job_id, "analysing", 25)
-            semantic = await choose_semantic_highlight(media, duration, work)
+
+            async def report_semantic_progress(done: int, total: int) -> None:
+                progress = 25 + int(25 * done / max(1, total))
+                await set_progress(client, job_id, "analysing", progress)
+
+            semantic = await choose_semantic_highlight(
+                media, duration, work, on_progress=report_semantic_progress
+            )
             if semantic:
                 candidates = [(semantic.start_seconds, semantic.end_seconds, semantic.score)]
                 semantic_title = semantic.title
