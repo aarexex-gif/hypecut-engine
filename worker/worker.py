@@ -194,15 +194,22 @@ def choose_highlight(path: Path, duration: float, clip_length: int) -> tuple[flo
     return max(choose_highlights(path, duration, clip_length, 1), key=lambda item: item[2])
 
 
-async def choose_semantic_highlight(media_path: Path, duration: float, work: Path):
-    """Inspect bounded, overlapping excerpts and return the strongest semantic AI moment."""
-    if not OPENAI_API_KEY or duration < 30:
-        return None
-    step = 45
-    last_start = max(0, int(duration) - 60)
-    offsets = list(range(0, last_start + 1, step))
+def semantic_window_offsets(duration: float, window_seconds: int = 60, step_seconds: int = 45) -> list[int]:
+    """Return overlapping windows covering the complete source timeline."""
+    if duration < 20 or window_seconds < 1 or step_seconds < 1:
+        return []
+    last_start = max(0, int(duration) - window_seconds)
+    offsets = list(range(0, last_start + 1, step_seconds))
     if not offsets or offsets[-1] != last_start:
         offsets.append(last_start)
+    return offsets
+
+
+async def choose_semantic_highlight(media_path: Path, duration: float, work: Path):
+    """Review every overlapping source window and return the strongest semantic moment."""
+    if not OPENAI_API_KEY or duration < 30:
+        return None
+    offsets = semantic_window_offsets(duration)
     # Do not sample only the beginning/middle/end of long recordings.
     # Every 45-second start position is reviewed, including a final window
     # aligned to the end so the entire source timeline is covered.
