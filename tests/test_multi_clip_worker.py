@@ -122,3 +122,61 @@ def test_long_semantic_review_reports_incremental_progress(monkeypatch, tmp_path
     )
 
     assert updates == [(5, 7), (7, 7)]
+
+
+
+def test_render_qc_accepts_synced_1080x1920_clip(monkeypatch, tmp_path):
+    metadata = {
+        "streams": [
+            {"codec_type": "video", "width": 1080, "height": 1920, "start_time": "0.000", "duration": "45.000"},
+            {"codec_type": "audio", "start_time": "0.020", "duration": "44.990"},
+        ]
+    }
+    monkeypatch.setattr(
+        worker.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=__import__("json").dumps(metadata)),
+    )
+
+    qc = worker.validate_rendered_clip(tmp_path / "clip.mp4")
+
+    assert qc["width"] == 1080
+    assert qc["height"] == 1920
+    assert qc["has_audio"] is True
+    assert qc["av_start_offset"] == 0.02
+
+
+def test_render_qc_rejects_audio_video_offset(monkeypatch, tmp_path):
+    metadata = {
+        "streams": [
+            {"codec_type": "video", "width": 1080, "height": 1920, "start_time": "0.000", "duration": "45.000"},
+            {"codec_type": "audio", "start_time": "0.300", "duration": "44.990"},
+        ]
+    }
+    monkeypatch.setattr(
+        worker.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=__import__("json").dumps(metadata)),
+    )
+
+    try:
+        worker.validate_rendered_clip(tmp_path / "bad-sync.mp4")
+        assert False, "Expected an audio/video synchronization failure"
+    except worker.WorkerError as exc:
+        assert "synchronization" in str(exc)
+
+
+def test_render_qc_rejects_non_vertical_output(monkeypatch, tmp_path):
+    metadata = {
+        "streams": [
+            {"codec_type": "video", "width": 1920, "height": 1080, "start_time": "0.000", "duration": "45.000"},
+        ]
+    }
+    monkeypatch.setattr(
+        worker.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=__import__("json").dumps(metadata)),
+    )
+
+    try:
+        worker.validate_rendered_clip(tmp_path / "landscape.mp4")
+        assert False, "Expected a vertical output validation failure"
+    except worker.WorkerError as exc:
+        assert "1080x1920" in str(exc)
