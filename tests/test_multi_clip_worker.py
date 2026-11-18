@@ -36,7 +36,7 @@ def test_choose_highlights_uses_safe_fallback_without_audio(monkeypatch):
     monkeypatch.setattr(
         worker.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=b""),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=b""),
     )
 
     clips = worker.choose_highlights(Path("silent.mp4"), 90, 30, max_clips=3)
