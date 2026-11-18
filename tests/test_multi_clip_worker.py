@@ -95,3 +95,30 @@ def test_semantic_window_attaches_visual_frames_and_cleans_temp_files(monkeypatc
     assert len(urls) == 3
     assert all(url.startswith("data:image/jpeg;base64,") for url in urls)
     assert not list(tmp_path.glob("*-frame-*.jpg"))
+
+
+
+def test_long_semantic_review_reports_incremental_progress(monkeypatch, tmp_path):
+    monkeypatch.setattr(worker, "OPENAI_API_KEY", "test-key")
+
+    def fake_render(args):
+        Path(args[-1]).write_bytes(b"window")
+        return ""
+
+    async def fake_rank_window(media, window_start=0.0):
+        return None
+
+    monkeypatch.setattr(worker, "run_ffmpeg", fake_render)
+    monkeypatch.setattr(worker, "rank_window", fake_rank_window)
+    updates = []
+
+    async def on_progress(done, total):
+        updates.append((done, total))
+
+    worker.asyncio.run(
+        worker.choose_semantic_highlight(
+            Path("long-recording.mp4"), 330, tmp_path, on_progress=on_progress
+        )
+    )
+
+    assert updates == [(5, 7), (7, 7)]
