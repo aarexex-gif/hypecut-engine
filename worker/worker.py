@@ -159,7 +159,9 @@ def choose_highlights(path: Path, duration: float, clip_length: int, max_clips: 
     baseline = float(np.percentile(rms, 75)) if len(rms) else 0.0
     ranked = np.argsort(scores)[::-1]
     chosen: list[tuple[float, float, float]] = []
-    min_gap = max(clip_length * 0.8, 20)
+    # Keep candidates distinct without spacing them so far apart that a
+    # typical three-minute upload cannot yield a three-clip pack.
+    min_gap = max(10, clip_length * 0.2)
     for candidate in ranked:
         start = min(float(candidate), max(0.0, duration - clip_length))
         end = min(duration, start + clip_length)
