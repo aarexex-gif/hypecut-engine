@@ -6,6 +6,7 @@ must supply a media file/segment that HYPECUT is permitted to process.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -97,6 +98,28 @@ async def transcribe_window(media: Path) -> str:
         audio.unlink(missing_ok=True)
 
 
+def _keyframe_data_urls(media: Path, duration: float) -> list[str]:
+    """Extract three representative visual frames from a short analysis window."""
+    urls: list[str] = []
+    sample_points = [duration * 0.2, duration * 0.5, duration * 0.8]
+    for index, second in enumerate(sample_points):
+        frame = media.with_name(f"{media.stem}-frame-{index}.jpg")
+        try:
+            _run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", f"{max(0.0, second):.3f}", "-i", str(media),
+                "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "5", str(frame),
+            ], timeout=60)
+            if frame.exists() and frame.stat().st_size:
+                encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
+                urls.append(f"data:image/jpeg;base64,{encoded}")
+        except Exception:
+            log.exception("Could not extract visual review frame from %s", media.name)
+        finally:
+            frame.unlink(missing_ok=True)
+    return urls
+
+
 async def rank_window(media: Path, window_start: float = 0.0) -> HighlightCandidate | None:
     """Rank a 30–60s live window using transcript semantics plus AV signals."""
     duration_result = _run([
@@ -113,21 +136,30 @@ async def rank_window(media: Path, window_start: float = 0.0) -> HighlightCandid
     scenes = await __import__("asyncio").to_thread(scene_change_count, media)
     if not OPENAI_API_KEY:
         return None
+    frame_urls = await __import__("asyncio").to_thread(_keyframe_data_urls, media, duration)
     prompt = {
         "transcript": transcript[:12000],
         "audio_features": features,
         "scene_change_count": scenes,
+        "visual_frames_attached": len(frame_urls),
         "duration_seconds": duration,
         "task": (
             "Evaluate this livestream excerpt for a compelling 30-60 second social short. "
-            "Score only genuine viewer value: humour, surprise, strong opinion, emotional "
-            "reaction, useful insight, impressive action, conflict with payoff, or memorable "
-            "story. Penalise missing context, repetition, silence, rambling and unclear speech. "
+            "Use BOTH the transcript and attached chronological video frames. Verify that "
+            "the visible action/context supports the spoken words; do not infer unseen events. "
+            "Score genuine viewer value: humour, surprise, strong opinion, emotional reaction, "
+            "useful insight, impressive action, conflict with payoff, or memorable story. "
+            "Penalise missing context, repetition, silence, rambling and unclear speech. "
             "Do not mistake loudness for quality. Return strict JSON with score 0-100, "
             "category, hook (max 12 words), title (max 70 chars), caption (max 180 chars), "
             "reasons (3 concise strings), and keep (boolean)."
         ),
     }
+    user_content = [{"type": "text", "text": json.dumps(prompt)}]
+    user_content.extend(
+        {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
+        for url in frame_urls
+    )
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post(
             "https://api.openai.com/v1/chat/completions",
@@ -137,8 +169,8 @@ async def rank_window(media: Path, window_start: float = 0.0) -> HighlightCandid
                 "temperature": 0.2,
                 "response_format": {"type": "json_object"},
                 "messages": [
-                    {"role": "system", "content": "You are a strict short-form video highlight editor. Never invent events absent from the transcript."},
-                    {"role": "user", "content": json.dumps(prompt)},
+                    {"role": "system", "content": "You are a strict audiovisual short-form video highlight editor. Never invent events absent from the transcript or attached frames."},
+                    {"role": "user", "content": user_content},
                 ],
             },
         )
