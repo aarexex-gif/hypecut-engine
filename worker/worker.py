@@ -134,39 +134,51 @@ def media_duration(path: Path) -> float:
     return max(0.0, float(output.strip()))
 
 
-def choose_highlight(path: Path, duration: float, clip_length: int) -> tuple[float, float, float]:
-    # Decode mono 8 kHz audio and score one-second RMS windows. If the source
-    # has no audio, use a safe middle segment rather than inventing a score.
+def choose_highlights(path: Path, duration: float, clip_length: int, max_clips: int = 3) -> list[tuple[float, float, float]]:
+    """Return high-energy, non-overlapping candidate windows from an authorised upload."""
     proc = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
         capture_output=True, timeout=900,
     )
     if proc.returncode or not proc.stdout:
         start = max(0.0, (duration - clip_length) / 2)
-        return start, min(duration, start + clip_length), 0.0
-
+        return [(start, min(duration, start + clip_length), 0.0)]
     samples = np.frombuffer(proc.stdout, dtype=np.float32)
     sample_rate = 8000
     window = sample_rate
     count = len(samples) // window
     if count < 1:
         start = max(0.0, (duration - clip_length) / 2)
-        return start, min(duration, start + clip_length), 0.0
+        return [(start, min(duration, start + clip_length), 0.0)]
     rms = np.array([
         float(np.sqrt(np.mean(np.square(samples[i*window:(i+1)*window], dtype=np.float64))))
         for i in range(count)
     ])
-    span = min(clip_length, max(1, int(duration)))
-    width = max(1, min(span, len(rms)))
-    # A moving average favours sustained energetic sections over one-sample spikes.
+    width = max(1, min(clip_length, len(rms)))
     scores = np.convolve(rms, np.ones(width) / width, mode="valid")
-    best = int(np.argmax(scores))
-    start = min(float(best), max(0.0, duration - clip_length))
-    end = min(duration, start + clip_length)
     baseline = float(np.percentile(rms, 75)) if len(rms) else 0.0
-    peak = float(np.max(scores)) if len(scores) else 0.0
-    score = 0.0 if baseline <= 1e-8 else min(100.0, max(0.0, 50.0 + 25.0 * (peak / baseline - 1.0)))
-    return start, end, round(score, 1)
+    ranked = np.argsort(scores)[::-1]
+    chosen: list[tuple[float, float, float]] = []
+    min_gap = max(clip_length * 0.8, 20)
+    for candidate in ranked:
+        start = min(float(candidate), max(0.0, duration - clip_length))
+        end = min(duration, start + clip_length)
+        if any(not (end + min_gap <= a or start >= b + min_gap) for a, b, _ in chosen):
+            continue
+        peak = float(scores[candidate])
+        score = 0.0 if baseline <= 1e-8 else min(100.0, max(0.0, 50.0 + 25.0 * (peak / baseline - 1.0)))
+        chosen.append((start, end, round(score, 1)))
+        if len(chosen) >= max_clips:
+            break
+    if not chosen:
+        start = max(0.0, (duration - clip_length) / 2)
+        chosen.append((start, min(duration, start + clip_length), 0.0))
+    return sorted(chosen, key=lambda item: item[0])
+
+
+def choose_highlight(path: Path, duration: float, clip_length: int) -> tuple[float, float, float]:
+    """Backward-compatible single-best helper."""
+    return max(choose_highlights(path, duration, clip_length, 1), key=lambda item: item[2])
 
 
 async def choose_semantic_highlight(media_path: Path, duration: float, work: Path):
@@ -262,56 +274,68 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             await set_progress(client, job_id, "analysing", 25)
             semantic = await choose_semantic_highlight(media, duration, work)
             if semantic:
-                start, end, score = semantic.start_seconds, semantic.end_seconds, semantic.score
-                clip_title = semantic.title or f"{(source.get('title') or 'HYPECUT highlight')[:140]} — AI highlight"
-                clip_description = (semantic.caption + "\\n\\n" + "; ".join(semantic.reasons)).strip()[:1500]
-                detection_reason = f"Semantic AI highlight: {semantic.category}. " + "; ".join(semantic.reasons)
+                candidates = [(semantic.start_seconds, semantic.end_seconds, semantic.score)]
+                semantic_title = semantic.title
+                semantic_description = (semantic.caption + "\\n\\n" + "; ".join(semantic.reasons)).strip()[:1500]
+                semantic_reason = f"Semantic AI highlight: {semantic.category}. " + "; ".join(semantic.reasons)
+                fallback = await asyncio.to_thread(choose_highlights, media, duration, clip_length, 3)
+                for candidate in fallback:
+                    if all(candidate[1] <= existing[0] or candidate[0] >= existing[1] for existing in candidates):
+                        candidates.append(candidate)
+                    if len(candidates) >= 3:
+                        break
+                candidates.sort(key=lambda item: item[0])
             else:
-                start, end, score = await asyncio.to_thread(choose_highlight, media, duration, clip_length)
-                clip_title = f"{(source.get('title') or 'HYPECUT highlight')[:180]} — highlight"
-                clip_description = "Automatically selected using an audio-energy fallback because semantic transcription/ranking was unavailable."
-                detection_reason = "Highest sustained audio-energy window (fallback)"
+                candidates = await asyncio.to_thread(choose_highlights, media, duration, clip_length, 3)
+                semantic_title = None
+                semantic_description = "Automatically selected using sustained audio-energy scoring."
+                semantic_reason = "High sustained audio-energy window (fallback)"
 
+            completed_clips = []
             await set_progress(client, job_id, "rendering", 55)
-            captions = await transcribe(client, media, work)
-            output = work / "clip.mp4"
-            args = [
-                "ffmpeg", "-y",
-                "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
-                "-ss", f"{start:.3f}", "-i", str(media),
-                "-t", f"{end-start:.3f}", "-map", "0:v:0", "-map", "0:a?",
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-            ]
-            if captions:
-                escaped = str(captions).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-                args[-1] += f",subtitles='{escaped}'"
-            args += ["-c:v", "libx264", "-threads", "2", "-x264-params", "threads=2",
-                     "-preset", "veryfast", "-crf", "23",
-                     "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output)]
-            await asyncio.to_thread(run_ffmpeg, args)
-            if not output.exists() or output.stat().st_size < 1024:
-                raise WorkerError("FFmpeg did not produce a valid clip")
+            for index, (start, end, score) in enumerate(candidates, start=1):
+                captions = await transcribe(client, media, work)
+                output = work / f"clip-{index}.mp4"
+                args = [
+                    "ffmpeg", "-y",
+                    "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
+                    "-ss", f"{start:.3f}", "-i", str(media),
+                    "-t", f"{end-start:.3f}", "-map", "0:v:0", "-map", "0:a?",
+                    "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+                ]
+                if captions:
+                    escaped = str(captions).replace("\\\\", "\\\\\\\\").replace(":", "\\\\:").replace("'", "\\\\'")
+                    args[-1] += f",subtitles='{escaped}'"
+                args += ["-c:v", "libx264", "-threads", "2", "-x264-params", "threads=2",
+                         "-preset", "veryfast", "-crf", "23",
+                         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output)]
+                await asyncio.to_thread(run_ffmpeg, args)
+                if not output.exists() or output.stat().st_size < 1024:
+                    raise WorkerError(f"FFmpeg did not produce clip {index}")
+                await set_progress(client, job_id, "uploading", 70 + int(20 * index / len(candidates)))
+                output_path = f"{user_id}/{job_id}/{index}.mp4"
+                await upload_file(client, OUTPUT_BUCKET, output_path, output, "video/mp4")
+                clip = {
+                    "user_id": user_id, "source_id": source["id"], "job_id": job_id,
+                    "title": (semantic_title if index == 1 and semantic_title else f"{(source.get('title') or 'HYPECUT highlight')[:150]} — Clip {index}"),
+                    "description": semantic_description if index == 1 and semantic else f"Automatically selected highlight {index} from this source.",
+                    "storage_path": output_path, "duration_seconds": round(end-start, 2),
+                    "aspect_ratio": "9:16", "captions_enabled": bool(captions),
+                    "hype_score": score, "detection_reason": (semantic_reason if index == 1 and semantic else f"{semantic_reason}; candidate {index}")[:1000],
+                    "status": "ready",
+                }
+                created = await rest_post(client, "clips", clip)
+                completed_clips.extend(created if isinstance(created, list) else [created])
 
-            await set_progress(client, job_id, "uploading", 85)
-            output_path = f"{user_id}/{job_id}.mp4"
-            await upload_file(client, OUTPUT_BUCKET, output_path, output, "video/mp4")
-            clip = {
-                "user_id": user_id, "source_id": source["id"], "job_id": job_id,
-                "title": clip_title,
-                "description": clip_description,
-                "storage_path": output_path, "duration_seconds": round(end-start, 2),
-                "aspect_ratio": "9:16", "captions_enabled": bool(captions),
-                "hype_score": score, "detection_reason": detection_reason[:1000],
-                "status": "ready",
-            }
-            await rest_post(client, "clips", clip)
+            first = candidates[0]
             await rest_patch(client, "clip_jobs", {"id": f"eq.{job_id}"}, {
                 "status": "completed", "progress_percent": 100,
-                "start_seconds": start, "end_seconds": end,
-                "hype_score": score, "detection_reason": detection_reason[:1000],
+                "start_seconds": first[0], "end_seconds": first[1],
+                "hype_score": max(item[2] for item in candidates),
+                "detection_reason": f"Generated {len(completed_clips)} vertical clips: {semantic_reason}"[:1000],
                 "completed_at": datetime.now(timezone.utc).isoformat(), "worker_locked_at": None, "updated_at": datetime.now(timezone.utc).isoformat(),
             })
-            log.info("Completed clip job %s", job_id)
+            log.info("Completed clip job %s with %s clips", job_id, len(completed_clips))
     except Exception as exc:
         log.exception("Job %s failed", job_id)
         try:
