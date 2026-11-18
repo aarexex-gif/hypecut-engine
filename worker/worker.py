@@ -214,26 +214,36 @@ async def choose_semantic_highlight(media_path: Path, duration: float, work: Pat
     return best
 
 
-async def transcribe(client: httpx.AsyncClient, media_path: Path, work: Path) -> Path | None:
+async def transcribe(
+    client: httpx.AsyncClient,
+    media_path: Path,
+    work: Path,
+    start_seconds: float = 0,
+    duration_seconds: float | None = None,
+) -> Path | None:
     if not OPENAI_API_KEY:
         return None
-    audio = work / "audio.mp3"
-    run_ffmpeg(["ffmpeg", "-y", "-ss", "0", "-i", str(media_path), "-vn", "-ac", "1", "-b:a", "64k", str(audio)])
+    suffix = str(int(start_seconds * 1000))
+    audio = work / f"audio-{suffix}.mp3"
+    args = ["ffmpeg", "-y", "-ss", f"{start_seconds:.3f}", "-i", str(media_path)]
+    if duration_seconds is not None:
+        args += ["-t", f"{duration_seconds:.3f}"]
+    args += ["-vn", "-ac", "1", "-b:a", "64k", str(audio)]
+    await asyncio.to_thread(run_ffmpeg, args)
     with audio.open("rb") as stream:
         response = await client.post(
             "https://api.openai.com/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             data={"model": "whisper-1", "response_format": "srt"},
-            files={"file": ("audio.mp3", stream, "audio/mpeg")},
+            files={"file": (audio.name, stream, "audio/mpeg")},
             timeout=600,
         )
     if response.is_error:
         log.warning("Transcription unavailable: %s", response.status_code)
         return None
-    srt = work / "captions.srt"
+    srt = work / f"captions-{suffix}.srt"
     srt.write_text(response.text, encoding="utf-8")
     return srt
-
 
 async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
     job_id = job["id"]
@@ -294,7 +304,7 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             completed_clips = []
             await set_progress(client, job_id, "rendering", 55)
             for index, (start, end, score) in enumerate(candidates, start=1):
-                captions = await transcribe(client, media, work)
+                captions = await transcribe(client, media, work, start, end - start)
                 output = work / f"clip-{index}.mp4"
                 args = [
                     "ffmpeg", "-y",
