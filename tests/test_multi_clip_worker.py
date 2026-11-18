@@ -180,3 +180,68 @@ def test_render_qc_rejects_non_vertical_output(monkeypatch, tmp_path):
         assert False, "Expected a vertical output validation failure"
     except worker.WorkerError as exc:
         assert "1080x1920" in str(exc)
+
+
+
+def test_model_api_retries_rate_limit_then_succeeds(monkeypatch):
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self.headers = {"Retry-After": "0.5"}
+            self.payload = payload or {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def post(self, url, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(429)
+            return FakeResponse(200, {"ok": True})
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    client = FakeClient()
+    response = worker.asyncio.run(
+        live_intelligence._post_with_retries(client, "https://example.test", attempts=3)
+    )
+
+    assert response.json() == {"ok": True}
+    assert client.calls == 2
+
+
+def test_model_api_does_not_retry_client_errors():
+    class FakeResponse:
+        status_code = 400
+        headers = {}
+
+        def raise_for_status(self):
+            raise RuntimeError("HTTP 400")
+
+    class FakeClient:
+        calls = 0
+
+        async def post(self, url, **kwargs):
+            self.calls += 1
+            return FakeResponse()
+
+    client = FakeClient()
+    try:
+        worker.asyncio.run(
+            live_intelligence._post_with_retries(client, "https://example.test", attempts=3)
+        )
+        assert False, "Expected client error to propagate"
+    except RuntimeError as exc:
+        assert "HTTP 400" in str(exc)
+
+    assert client.calls == 1
