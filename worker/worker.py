@@ -134,6 +134,42 @@ def media_duration(path: Path) -> float:
     return max(0.0, float(output.strip()))
 
 
+def validate_rendered_clip(path: Path, max_av_offset: float = 0.15, max_stream_duration_delta: float = 0.75) -> dict[str, Any]:
+    """Reject malformed renders and measurable audio/video timestamp drift."""
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    if proc.returncode:
+        raise WorkerError("Could not inspect rendered clip")
+    try:
+        metadata = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise WorkerError("Rendered clip metadata is invalid") from exc
+    streams = metadata.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not video:
+        raise WorkerError("Rendered clip has no video stream")
+    if int(video.get("width") or 0) != 1080 or int(video.get("height") or 0) != 1920:
+        raise WorkerError("Rendered clip is not 1080x1920 vertical output")
+    if audio:
+        video_start = float(video.get("start_time") or 0)
+        audio_start = float(audio.get("start_time") or 0)
+        if abs(video_start - audio_start) > max_av_offset:
+            raise WorkerError("Rendered clip failed audio/video synchronization check")
+        video_duration = float(video.get("duration") or 0)
+        audio_duration = float(audio.get("duration") or 0)
+        if video_duration > 0 and audio_duration > 0 and abs(video_duration - audio_duration) > max_stream_duration_delta:
+            raise WorkerError("Rendered clip audio/video durations are misaligned")
+    return {
+        "width": int(video.get("width") or 0),
+        "height": int(video.get("height") or 0),
+        "has_audio": audio is not None,
+        "av_start_offset": abs(float(video.get("start_time") or 0) - float(audio.get("start_time") or 0)) if audio else None,
+    }
+
+
 def choose_highlights(path: Path, duration: float, clip_length: int, max_clips: int = 3) -> list[tuple[float, float, float]]:
     """Return high-energy, non-overlapping candidate windows from an authorised upload."""
     # Decode in bounded five-minute chunks. A six-hour recording therefore
@@ -349,6 +385,8 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                 await asyncio.to_thread(run_ffmpeg, args)
                 if not output.exists() or output.stat().st_size < 1024:
                     raise WorkerError(f"FFmpeg did not produce clip {index}")
+                qc = await asyncio.to_thread(validate_rendered_clip, output)
+                log.info("Clip %s passed render QC: %s", index, qc)
                 await set_progress(client, job_id, "uploading", 70 + int(20 * index / len(candidates)))
                 output_path = f"{user_id}/{job_id}/{index}.mp4"
                 await upload_file(client, OUTPUT_BUCKET, output_path, output, "video/mp4")
