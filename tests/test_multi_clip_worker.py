@@ -7,6 +7,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import worker
+import live_intelligence
 
 
 def test_choose_highlights_returns_three_distinct_windows(monkeypatch):
@@ -78,3 +79,19 @@ def test_audio_analysis_decodes_long_recording_in_bounded_chunks(monkeypatch):
 
     assert calls == [0.0, 300.0, 600.0]
     assert any(start >= 500 for start, _, _ in clips)
+
+
+
+def test_semantic_window_attaches_visual_frames_and_cleans_temp_files(monkeypatch, tmp_path):
+    media = tmp_path / "window.mp4"
+
+    def fake_run(command, timeout=300):
+        Path(command[-1]).write_bytes(b"fake-jpeg-frame")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(live_intelligence, "_run", fake_run)
+    urls = live_intelligence._keyframe_data_urls(media, 60)
+
+    assert len(urls) == 3
+    assert all(url.startswith("data:image/jpeg;base64,") for url in urls)
+    assert not list(tmp_path.glob("*-frame-*.jpg"))
