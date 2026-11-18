@@ -136,24 +136,35 @@ def media_duration(path: Path) -> float:
 
 def choose_highlights(path: Path, duration: float, clip_length: int, max_clips: int = 3) -> list[tuple[float, float, float]]:
     """Return high-energy, non-overlapping candidate windows from an authorised upload."""
-    proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
-        capture_output=True, timeout=900,
-    )
-    if proc.returncode or not proc.stdout:
-        start = max(0.0, (duration - clip_length) / 2)
-        return [(start, min(duration, start + clip_length), 0.0)]
-    samples = np.frombuffer(proc.stdout, dtype=np.float32)
+    # Decode in bounded five-minute chunks. A six-hour recording therefore
+    # never requires hundreds of megabytes of decoded PCM in one allocation.
     sample_rate = 8000
-    window = sample_rate
-    count = len(samples) // window
-    if count < 1:
+    chunk_seconds = 300
+    rms_parts: list[np.ndarray] = []
+    for offset in range(0, max(1, int(np.ceil(duration))), chunk_seconds):
+        chunk_duration = min(chunk_seconds, duration - offset)
+        if chunk_duration <= 0:
+            break
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{offset:.3f}", "-i", str(path),
+             "-t", f"{chunk_duration:.3f}", "-vn", "-ac", "1", "-ar", str(sample_rate),
+             "-f", "f32le", "-"],
+            capture_output=True, timeout=900,
+        )
+        if proc.returncode:
+            raise WorkerError(f"Audio analysis failed in source segment at {offset}s")
+        if not proc.stdout:
+            continue
+        samples = np.frombuffer(proc.stdout, dtype=np.float32)
+        count = len(samples) // sample_rate
+        if count:
+            complete = samples[:count * sample_rate].reshape(count, sample_rate)
+            chunk_rms = np.sqrt(np.mean(np.square(complete, dtype=np.float64), axis=1))
+            rms_parts.append(chunk_rms.astype(np.float32))
+    if not rms_parts:
         start = max(0.0, (duration - clip_length) / 2)
         return [(start, min(duration, start + clip_length), 0.0)]
-    rms = np.array([
-        float(np.sqrt(np.mean(np.square(samples[i*window:(i+1)*window], dtype=np.float64))))
-        for i in range(count)
-    ])
+    rms = np.concatenate(rms_parts)
     width = max(1, min(clip_length, len(rms)))
     scores = np.convolve(rms, np.ones(width) / width, mode="valid")
     baseline = float(np.percentile(rms, 75)) if len(rms) else 0.0
@@ -192,10 +203,9 @@ async def choose_semantic_highlight(media_path: Path, duration: float, work: Pat
     offsets = list(range(0, last_start + 1, step))
     if not offsets or offsets[-1] != last_start:
         offsets.append(last_start)
-    # Bound API cost and processing time for very long uploads.
-    if len(offsets) > 12:
-        indexes = np.linspace(0, len(offsets) - 1, 12).round().astype(int)
-        offsets = [offsets[i] for i in sorted(set(indexes.tolist()))]
+    # Do not sample only the beginning/middle/end of long recordings.
+    # Every 45-second start position is reviewed, including a final window
+    # aligned to the end so the entire source timeline is covered.
     best = None
     for index, offset in enumerate(offsets):
         excerpt = work / f"semantic-window-{index}.mp4"
