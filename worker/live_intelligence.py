@@ -98,6 +98,29 @@ async def transcribe_window(media: Path) -> str:
         audio.unlink(missing_ok=True)
 
 
+async def _post_with_retries(client: httpx.AsyncClient, url: str, *, attempts: int = 3, **kwargs):
+    """Retry transient model API failures without retrying invalid requests."""
+    for attempt in range(max(1, attempts)):
+        try:
+            response = await client.post(url, **kwargs)
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt + 1 < max(1, attempts):
+                    retry_after = response.headers.get("Retry-After", "")
+                    try:
+                        delay = min(20.0, max(0.5, float(retry_after)))
+                    except (TypeError, ValueError):
+                        delay = min(8.0, 2.0 ** attempt)
+                    await __import__("asyncio").sleep(delay)
+                    continue
+            response.raise_for_status()
+            return response
+        except (httpx.TimeoutException, httpx.TransportError):
+            if attempt + 1 >= max(1, attempts):
+                raise
+            await __import__("asyncio").sleep(min(8.0, 2.0 ** attempt))
+    raise RuntimeError("Model API request exhausted retry attempts")
+
+
 def _keyframe_data_urls(media: Path, duration: float) -> list[str]:
     """Extract three representative visual frames from a short analysis window."""
     urls: list[str] = []
@@ -161,7 +184,8 @@ async def rank_window(media: Path, window_start: float = 0.0) -> HighlightCandid
         for url in frame_urls
     )
     async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(
+        response = await _post_with_retries(
+            client,
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             json={
@@ -174,7 +198,6 @@ async def rank_window(media: Path, window_start: float = 0.0) -> HighlightCandid
                 ],
             },
         )
-        response.raise_for_status()
         data = response.json()
     raw = data["choices"][0]["message"]["content"]
     verdict = json.loads(raw)
