@@ -108,6 +108,22 @@ async def upload_file(client: httpx.AsyncClient, bucket: str, path: str, file_pa
     response.raise_for_status()
 
 
+async def cleanup_failed_job_outputs(client: httpx.AsyncClient, job_id: str, user_id: str, paths: list[str]) -> None:
+    """Remove this failed attempt's visible rows and uploaded objects."""
+    if paths:
+        response = await client.request(
+            "POST", f"{SUPABASE_URL}/storage/v1/object/{OUTPUT_BUCKET}",
+            headers=headers(), json={"prefixes": paths},
+        )
+        response.raise_for_status()
+    response = await client.delete(
+        f"{SUPABASE_URL}/rest/v1/clips",
+        params={"job_id": f"eq.{job_id}", "user_id": f"eq.{user_id}"},
+        headers=headers(),
+    )
+    response.raise_for_status()
+
+
 async def set_progress(client: httpx.AsyncClient, job_id: str, status: str, progress: int) -> None:
     await rest_patch(
         client, "clip_jobs", {"id": f"eq.{job_id}"},
@@ -305,6 +321,7 @@ async def transcribe(
 async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
     job_id = job["id"]
     user_id = job["user_id"]
+    uploaded_paths: list[str] = []
     try:
         sources = await rest_get(client, "sources", {
             "select": "id,platform,source_url,metadata,title",
@@ -390,6 +407,7 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                 await set_progress(client, job_id, "uploading", 70 + int(20 * index / len(candidates)))
                 output_path = f"{user_id}/{job_id}/{index}.mp4"
                 await upload_file(client, OUTPUT_BUCKET, output_path, output, "video/mp4")
+                uploaded_paths.append(output_path)
                 clip = {
                     "user_id": user_id, "source_id": source["id"], "job_id": job_id,
                     "title": (semantic_title if index == 1 and semantic_title else f"{(source.get('title') or 'HYPECUT highlight')[:150]} — Clip {index}"),
@@ -413,6 +431,10 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             log.info("Completed clip job %s with %s clips", job_id, len(completed_clips))
     except Exception as exc:
         log.exception("Job %s failed", job_id)
+        try:
+            await cleanup_failed_job_outputs(client, job_id, user_id, uploaded_paths)
+        except Exception:
+            log.exception("Could not clean partial outputs for failed job %s", job_id)
         try:
             await rest_patch(client, "clip_jobs", {"id": f"eq.{job_id}"}, {
                 "status": "failed", "error_code": "worker_processing_failed",
