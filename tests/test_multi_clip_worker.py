@@ -442,8 +442,8 @@ def test_word_timestamps_create_karaoke_ass_captions():
 
     assert ass is not None
     assert "[Events]" in ass
-    assert r"{\\k30}This" in ass
-    assert r"{\\k39}is" in ass
+    assert r"{\k30}This" in ass
+    assert r"{\k39}is" in ass
     assert "Dialogue: 0,0:00:00.20,0:00:01.30" in ass
     assert "Dialogue: 0,0:00:02.00,0:00:02.40" in ass
     assert r"\\n" not in ass
