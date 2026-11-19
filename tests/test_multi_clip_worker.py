@@ -426,3 +426,35 @@ def test_facecam_box_validation_clamps_and_rejects_invalid_boxes():
         {"x": 0.2, "y": 0.2, "width": 0.02, "height": 0.4}
     ) is None
     assert live_intelligence.normalise_facecam_box({"x": "bad"}) is None
+
+
+
+def test_word_timestamps_create_karaoke_ass_captions():
+    payload = {
+        "words": [
+            {"start": 0.2, "end": 0.5, "word": " This"},
+            {"start": 0.51, "end": 0.9, "word": " is"},
+            {"start": 0.91, "end": 1.3, "word": " HYPECUT!"},
+            {"start": 2.0, "end": 2.4, "word": " Amazing"},
+        ]
+    }
+    ass = worker.word_timestamps_to_ass(payload, 5.0)
+
+    assert ass is not None
+    assert "[Events]" in ass
+    assert r"{\\k30}This" in ass
+    assert r"{\\k39}is" in ass
+    assert "Dialogue: 0,0:00:00.20,0:00:01.30" in ass
+    assert "Dialogue: 0,0:00:02.00,0:00:02.40" in ass
+    assert "\\\\n" not in ass
+
+
+def test_word_timestamps_reject_invalid_and_out_of_range_words():
+    payload = {
+        "words": [
+            {"start": -1, "end": 0.5, "word": "bad"},
+            {"start": 1, "end": 1, "word": "zero"},
+            {"start": 4, "end": 5, "word": "late"},
+        ]
+    }
+    assert worker.word_timestamps_to_ass(payload, 4.0) is None
