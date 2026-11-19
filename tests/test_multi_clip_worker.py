@@ -279,7 +279,7 @@ def test_failed_job_cleanup_removes_uploaded_objects_and_clip_rows(monkeypatch):
     assert calls[0][2]["params"] == {
         "job_id": "eq.job-123", "user_id": "eq.user-456"
     }
-    assert calls[1][0] == "POST"
+    assert calls[1][0] == "DELETE"
     assert calls[1][1].endswith("/storage/v1/object/hypecut-clips")
     assert calls[1][2]["json"]["prefixes"] == [
         "user-456/job-123/1.mp4", "user-456/job-123/2.mp4"
