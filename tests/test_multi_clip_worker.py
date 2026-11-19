@@ -494,3 +494,40 @@ def test_vertical_filter_accepts_activity_driven_zoom_expression():
     )
 
     assert "zoompan=z='min(1.16,1+0.12*max(0,1-abs(on-90)/45))'" in graph
+
+
+
+def test_motion_zoom_expression_caps_number_and_strength_of_pulses(monkeypatch, tmp_path):
+    # Every sampled frame changes, creating many candidate peaks. The renderer
+    # must still receive a bounded expression with no more than four pulses.
+    rng = np.random.default_rng(7)
+    frames = rng.integers(0, 255, size=(80, 90, 160), dtype=np.uint8)
+    monkeypatch.setattr(
+        worker.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=frames.tobytes()),
+    )
+
+    expression = worker.motion_zoom_expression(tmp_path / "busy.mp4", 40)
+
+    assert expression.startswith("min(1.16,1+")
+    assert expression.count("max(0,1-abs(on-") <= 4
+    assert all(float(value) <= 0.14 for value in __import__("re").findall(r"([0-9]+\\.[0-9]+)\\*max", expression))
+
+
+def test_motion_zoom_expression_falls_back_when_ffmpeg_sampling_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        worker.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=b""),
+    )
+
+    expression = worker.motion_zoom_expression(tmp_path / "unreadable.mp4", 10)
+
+    assert expression == "1+0.08*(0.5-0.5*cos(2*PI*on/240))"
+
+
+def test_facecam_inset_crop_avoids_left_and_right_panels():
+    left = worker.build_vertical_filter(facecam_box=(0.02, 0.08, 0.24, 0.42))
+    right = worker.build_vertical_filter(facecam_box=(0.74, 0.08, 0.24, 0.42))
+
+    assert "x=iw*0.2600+" in left
+    assert "x=(iw*0.7400-ih*9/16)/2" in right
