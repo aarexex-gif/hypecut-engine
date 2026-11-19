@@ -203,7 +203,15 @@ def build_vertical_filter(
         elif right_edge > 0.6:
             crop_x = f"(iw*{x:.4f}-ih*9/16)/2"
         else:
-            crop_x = "(iw-ih*9/16)/2"
+            # A centrally placed webcam must not remain baked into the gameplay
+            # crop as well as appearing in the separate inset. Choose the side
+            # with more horizontal room and keep the crop outside its box.
+            left_room = x
+            right_room = 1.0 - right_edge
+            if right_room >= left_room:
+                crop_x = f"iw*{right_edge:.4f}"
+            else:
+                crop_x = f"iw*{x:.4f}-ih*9/16"
     else:
         crop_x = "(iw-ih*9/16)/2"
     zoom_expression = zoom_expression or "1+0.08*(0.5-0.5*cos(2*PI*on/240))"
