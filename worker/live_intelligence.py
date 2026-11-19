@@ -86,13 +86,14 @@ async def transcribe_window(media: Path) -> str:
     try:
         async with httpx.AsyncClient(timeout=300) as client:
             with audio.open("rb") as stream:
-                response = await client.post(
+                response = await _post_with_retries(
+                    client,
                     "https://api.openai.com/v1/audio/transcriptions",
+                    attempts=3,
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                     data={"model": "whisper-1", "response_format": "text"},
                     files={"file": (audio.name, stream, "audio/mpeg")},
                 )
-            response.raise_for_status()
             return response.text.strip()
     finally:
         audio.unlink(missing_ok=True)
@@ -102,6 +103,12 @@ async def _post_with_retries(client: httpx.AsyncClient, url: str, *, attempts: i
     """Retry transient model API failures without retrying invalid requests."""
     for attempt in range(max(1, attempts)):
         try:
+            # Multipart streams are consumed by httpx; rewind them before each retry.
+            for file_spec in (kwargs.get("files") or {}).values():
+                if isinstance(file_spec, tuple) and len(file_spec) > 1:
+                    stream = file_spec[1]
+                    if hasattr(stream, "seek"):
+                        stream.seek(0)
             response = await client.post(url, **kwargs)
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt + 1 < max(1, attempts):
