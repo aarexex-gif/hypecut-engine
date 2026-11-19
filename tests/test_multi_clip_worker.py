@@ -383,6 +383,8 @@ def test_vertical_filter_crops_gameplay_to_portrait_and_blurs_background():
     assert "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase" in graph
     assert "boxblur=20:10" in graph
     assert "[fgsrc]crop=w=ih*9/16:h=ih:x=(iw-ih*9/16)/2:y=0" in graph
+    assert "zoompan=z='1+0.08*(0.5-0.5*cos(2*PI*on/240))'" in graph
+    assert "s=1080x1920:fps=30[fg]" in graph
     assert "[bg][fg]overlay=0:0" in graph
     assert graph.endswith("[vout]")
 
