@@ -311,3 +311,42 @@ def test_failed_job_cleanup_skips_storage_request_when_no_uploads(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][0] == "delete"
+
+
+
+def test_caption_validator_accepts_in_range_srt_cues():
+    srt = """1
+00:00:00,200 --> 00:00:01,400
+Hello there.
+
+2
+00:00:01,500 --> 00:00:03,000
+Welcome to HYPECUT.
+"""
+    assert worker.validate_srt_captions(srt, 3.0)
+
+
+def test_caption_validator_rejects_cues_beyond_clip_duration():
+    srt = """1
+00:00:04,000 --> 00:00:05,000
+Late caption.
+"""
+    assert not worker.validate_srt_captions(srt, 4.5)
+
+
+def test_caption_validator_rejects_malformed_or_empty_cues():
+    assert not worker.validate_srt_captions("not an srt file", 30)
+    assert not worker.validate_srt_captions("1\\n00:00:01,000 --> 00:00:01,000\\nEmpty duration", 30)
+    assert not worker.validate_srt_captions("", 30)
+
+
+def test_caption_validator_rejects_non_monotonic_cue_order():
+    srt = """1
+00:00:05,000 --> 00:00:06,000
+Later.
+
+2
+00:00:02,000 --> 00:00:03,000
+Earlier.
+"""
+    assert not worker.validate_srt_captions(srt, 10)
