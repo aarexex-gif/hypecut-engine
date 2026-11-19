@@ -434,7 +434,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         parts = []
         for word_start, word_end, word in group:
             duration_cs = max(1, int(round((word_end - word_start) * 100)))
-            parts.append(f"{{\\\\k{duration_cs}}}{word}")
+            parts.append(f"{{\\k{duration_cs}}}{word}")
         events.append(
             f"Dialogue: 0,{_ass_timestamp(start)},{_ass_timestamp(end)},"
             f"Default,,0,0,0,,{' '.join(parts)}"
