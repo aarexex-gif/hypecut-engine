@@ -152,9 +152,46 @@ def media_duration(path: Path) -> float:
     return max(0.0, float(output.strip()))
 
 
+def motion_zoom_expression(path: Path, duration: float) -> str:
+    """Derive restrained zoom pulses from actual frame-to-frame visual activity."""
+    if duration < 2:
+        return "1+0.08*(0.5-0.5*cos(2*PI*on/240))"
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-an", "-vf",
+         "fps=2,scale=160:90:flags=area,format=gray",
+         "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+        capture_output=True, timeout=180,
+    )
+    frame_size = 160 * 90
+    if proc.returncode or len(proc.stdout) < frame_size * 4:
+        return "1+0.08*(0.5-0.5*cos(2*PI*on/240))"
+    frames = np.frombuffer(proc.stdout, dtype=np.uint8)
+    frames = frames[:(len(frames) // frame_size) * frame_size].reshape(-1, 90, 160)
+    activity = np.mean(np.abs(np.diff(frames.astype(np.float32), axis=0)), axis=(1, 2))
+    if len(activity) < 3 or float(np.max(activity)) < 1.5:
+        return "1"
+    smooth = np.convolve(activity, np.ones(3) / 3, mode="same")
+    threshold = max(float(np.percentile(smooth, 70)), float(np.max(smooth)) * 0.38)
+    peaks = sorted((i for i in range(1, len(smooth)-1)
+        if smooth[i] >= threshold and smooth[i] >= smooth[i-1] and smooth[i] >= smooth[i+1]),
+        key=lambda i: smooth[i], reverse=True)
+    selected = []
+    for peak in peaks:
+        if all(abs(peak-other) >= 5 for other in selected):
+            selected.append(peak)
+        if len(selected) == 4:
+            break
+    if not selected:
+        return "1"
+    maximum = max(float(np.max(smooth)), 1e-6)
+    pulses = [f"{min(0.14, 0.06 + 0.08*float(smooth[p]/maximum)):.4f}*max(0,1-abs(on-{int(round((p+0.5)*15))})/45)" for p in selected]
+    return "1+" + "+".join(pulses)
+
+
 def build_vertical_filter(
     captions_path: str | None = None,
     facecam_box: tuple[float, float, float, float] | None = None,
+    zoom_expression: str | None = None,
 ) -> str:
     """Compose a portrait gaming short and optionally lift the detected facecam into a clear inset."""
     split = "[0:v]split=3[bgsrc][fgsrc][camsrc];" if facecam_box else "[0:v]split=2[bgsrc][fgsrc];"
@@ -169,13 +206,14 @@ def build_vertical_filter(
             crop_x = "(iw-ih*9/16)/2"
     else:
         crop_x = "(iw-ih*9/16)/2"
+    zoom_expression = zoom_expression or "1+0.08*(0.5-0.5*cos(2*PI*on/240))"
     graph = (
         split
         + "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=20:10[bg];"
         f"[fgsrc]crop=w=ih*9/16:h=ih:x={crop_x}:y=0,"
         "scale=1080:1920:flags=lanczos,"
-        "zoompan=z='1+0.08*(0.5-0.5*cos(2*PI*on/240))':"
+        f"zoompan=z='{zoom_expression}':"
         "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
         "d=1:s=1080x1920:fps=30[fg];"
         "[bg][fg]overlay=0:0,setsar=1[base]"
@@ -577,12 +615,21 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             await set_progress(client, job_id, "rendering", 55)
             for index, (start, end, score) in enumerate(candidates, start=1):
                 captions = await transcribe(client, media, work, start, end - start)
+                clip_source = work / f"motion-source-{index}.mp4"
+                await asyncio.to_thread(run_ffmpeg, [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-ss", f"{start:.3f}", "-i", str(media), "-t", f"{end-start:.3f}",
+                    "-map", "0:v:0", "-an", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-threads", "2", str(clip_source),
+                ])
+                zoom_expression = await asyncio.to_thread(motion_zoom_expression, clip_source, end-start)
+                clip_source.unlink(missing_ok=True)
                 output = work / f"clip-{index}.mp4"
                 args = [
                     "ffmpeg", "-y",
                     "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
                     "-ss", f"{start:.3f}", "-i", str(media),
-                    "-t", f"{end-start:.3f}", "-filter_complex", build_vertical_filter(str(captions) if captions else None, facecam_box),
+                    "-t", f"{end-start:.3f}", "-filter_complex", build_vertical_filter(str(captions) if captions else None, facecam_box, zoom_expression),
                     "-map", "[vout]", "-map", "0:a?",
                 ]
                 args += ["-c:v", "libx264", "-threads", "2", "-x264-params", "threads=2",
