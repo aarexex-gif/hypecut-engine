@@ -392,3 +392,22 @@ def test_vertical_filter_adds_captions_to_composited_output():
 
     assert "subtitles='/tmp/captions.srt'" in graph
     assert graph.endswith("[vout]")
+
+
+
+def test_vertical_filter_adds_detected_facecam_inset():
+    graph = worker.build_vertical_filter(
+        facecam_box=(0.02, 0.08, 0.24, 0.42)
+    )
+
+    assert "crop=w=iw*0.2400:h=ih*0.4200:x=iw*0.0200:y=ih*0.0800" in graph
+    assert "scale=420:-2:flags=lanczos" in graph
+    assert "overlay=x=W-w-36:y=72" in graph
+    assert graph.endswith("[vout]")
+
+
+def test_vertical_filter_without_facecam_uses_safe_portrait_fallback():
+    graph = worker.build_vertical_filter()
+
+    assert "[base]null" in graph
+    assert "[vout]" in graph
