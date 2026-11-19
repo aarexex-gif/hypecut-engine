@@ -155,7 +155,7 @@ def normalise_facecam_box(value: Any) -> tuple[float, float, float, float] | Non
         return None
     x, y = max(0.0, min(1.0, x)), max(0.0, min(1.0, y))
     width, height = min(width, 1.0 - x), min(height, 1.0 - y)
-    if width < 0.08 or height < 0.08 or width > 0.85 or height > 0.85:
+    if width < 0.08 or height < 0.08 or width > 0.6 or height > 0.85:
         return None
     return (round(x, 4), round(y, 4), round(width, 4), round(height, 4))
 
