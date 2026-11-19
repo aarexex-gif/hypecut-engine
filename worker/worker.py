@@ -16,7 +16,7 @@ import httpx
 import numpy as np
 
 from live_pipeline import process_live_sessions
-from live_intelligence import rank_window
+from live_intelligence import detect_facecam_region, rank_window
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("hypecut-worker")
@@ -152,15 +152,29 @@ def media_duration(path: Path) -> float:
     return max(0.0, float(output.strip()))
 
 
-def build_vertical_filter(captions_path: str | None = None) -> str:
-    """Fit the complete landscape frame inside a 9:16 canvas with a blurred fill."""
+def build_vertical_filter(
+    captions_path: str | None = None,
+    facecam_box: tuple[float, float, float, float] | None = None,
+) -> str:
+    """Compose a portrait gaming short and optionally lift the detected facecam into a clear inset."""
     graph = (
         "[0:v]split=2[bgsrc][fgsrc];"
         "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=20:10[bg];"
         "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]"
     )
+    if facecam_box:
+        x, y, width, height = facecam_box
+        graph += (
+            f";[0:v]crop=w=iw*{width:.4f}:h=ih*{height:.4f}:"
+            f"x=iw*{x:.4f}:y=ih*{y:.4f},"
+            "scale=420:-2:flags=lanczos,setsar=1[cam];"
+            "[base][cam]overlay=x=W-w-36:y=72:eval=init:shortest=1,"
+            "drawbox=x=W-w-36:y=72:w=iw:h=ih:color=white@0.9:t=3"
+        )
+    else:
+        graph += ";[base]null"
     if captions_path:
         escaped = captions_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
         graph += f",subtitles='{escaped}'"
@@ -439,6 +453,15 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                 semantic_description = "Automatically selected using sustained audio-energy scoring."
                 semantic_reason = "High sustained audio-energy window (fallback)"
 
+            # Detect the webcam panel once per source. If vision cannot locate it,
+            # retain the safe full-frame portrait composition without an inset.
+            try:
+                facecam_box = await detect_facecam_region(media)
+            except Exception:
+                log.exception("Facecam detection failed; using full-frame fallback composition")
+                facecam_box = None
+            log.info("Facecam composition detected: %s", bool(facecam_box))
+
             completed_clips = []
             await set_progress(client, job_id, "rendering", 55)
             for index, (start, end, score) in enumerate(candidates, start=1):
@@ -448,7 +471,7 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                     "ffmpeg", "-y",
                     "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
                     "-ss", f"{start:.3f}", "-i", str(media),
-                    "-t", f"{end-start:.3f}", "-filter_complex", build_vertical_filter(str(captions) if captions else None),
+                    "-t", f"{end-start:.3f}", "-filter_complex", build_vertical_filter(str(captions) if captions else None, facecam_box),
                     "-map", "[vout]", "-map", "0:a?",
                 ]
                 args += ["-c:v", "libx264", "-threads", "2", "-x264-params", "threads=2",
