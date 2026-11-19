@@ -2,7 +2,7 @@ name: Python tests
 
 on:
   push:
-    branches: ["main", "feature/**"]
+    branches: ["main", "feature/**", "feat/**"]
   pull_request:
     branches: ["main"]
 
@@ -22,3 +22,5 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Run tests
         run: python -m pytest -q
+      - name: Build production media-worker image
+        run: docker build -f worker/Dockerfile -t hypecut-media-worker:test worker
