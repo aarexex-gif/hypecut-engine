@@ -177,7 +177,12 @@ def build_vertical_filter(
         graph += ";[base]null"
     if captions_path:
         escaped = captions_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        graph += f",subtitles='{escaped}'"
+        graph += (
+            f",subtitles='{escaped}':force_style="
+            "'FontName=Arial,FontSize=48,Bold=1,PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00101010,BorderStyle=1,Outline=4,Shadow=1,"
+            "Alignment=2,MarginV=210'"
+        )
     return graph + "[vout]"
 
 
