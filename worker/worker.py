@@ -198,9 +198,9 @@ def build_vertical_filter(
     if facecam_box:
         x, _, width, _ = facecam_box
         right_edge = x + width
-        if x < 0.4:
+        if x < 0.4 - 1e-9:
             crop_x = f"iw*{right_edge:.4f}+(iw*(1-{right_edge:.4f})-ih*9/16)/2"
-        elif right_edge > 0.6:
+        elif right_edge > 0.6 + 1e-9:
             crop_x = f"(iw*{x:.4f}-ih*9/16)/2"
         else:
             # A centrally placed webcam must not remain baked into the gameplay
