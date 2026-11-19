@@ -290,30 +290,38 @@ async def choose_semantic_highlight(media_path: Path, duration: float, work: Pat
 
 
 def validate_srt_captions(content: str, clip_duration: float) -> bool:
-    """Validate caption cue syntax, ordering, and bounds before burn-in."""
-    timestamp = re.compile(r"^(\d{2,}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2,}:\d{2}:\d{2},\d{3})(?:\s+.*)?$")
-    def seconds(value: str) -> float:
-        hours, minutes, rest = value.split(":")
-        whole, millis = rest.split(",")
+    """Validate numbered SRT cues, timestamp fields, ordering, and clip bounds."""
+    timestamp = re.compile(r"^(\d{2,}):(\d{2}):(\d{2}),(\d{3})\s+-->\s+(\d{2,}):(\d{2}):(\d{2}),(\d{3})(?:\s+.*)?$")
+
+    def seconds(hours: str, minutes: str, whole: str, millis: str) -> float | None:
+        if int(minutes) > 59 or int(whole) > 59:
+            return None
         return int(hours) * 3600 + int(minutes) * 60 + int(whole) + int(millis) / 1000
 
     blocks = [block.strip() for block in re.split(r"\n\s*\n", content.strip()) if block.strip()]
     if not blocks or clip_duration <= 0:
         return False
     previous_start = -1.0
+    seen_indices: set[int] = set()
     for block in blocks:
         lines = block.splitlines()
-        timing_index = next((i for i, line in enumerate(lines) if "-->" in line), None)
-        if timing_index is None:
+        if len(lines) < 3 or not lines[0].strip().isdigit():
             return False
-        timing_line = lines[timing_index].strip()
-        match = timestamp.match(timing_line)
+        cue_index = int(lines[0].strip())
+        if cue_index < 1 or cue_index in seen_indices:
+            return False
+        seen_indices.add(cue_index)
+        match = timestamp.match(lines[1].strip())
         if not match:
             return False
-        start, end = map(seconds, match.groups())
+        values = match.groups()
+        start = seconds(*values[:4])
+        end = seconds(*values[4:])
+        if start is None or end is None:
+            return False
         if start < 0 or end <= start or end > clip_duration + 0.25 or start < previous_start:
             return False
-        if not any(line.strip() for line in lines[timing_index + 1:]):
+        if not any(line.strip() for line in lines[2:]):
             return False
         previous_start = start
     return True
