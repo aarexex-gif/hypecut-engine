@@ -483,13 +483,14 @@ async def transcribe(
         captions.write_text(ass_content, encoding="utf-8")
         return captions
     # Keep a conservative segment-caption fallback if word timestamps are absent.
-    fallback = await client.post(
-        "https://api.openai.com/v1/audio/transcriptions",
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-        data={"model": "whisper-1", "response_format": "srt"},
-        files={"file": (audio.name, audio.open("rb"), "audio/mpeg")},
-        timeout=600,
-    )
+    with audio.open("rb") as fallback_stream:
+        fallback = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            data={"model": "whisper-1", "response_format": "srt"},
+            files={"file": (audio.name, fallback_stream, "audio/mpeg")},
+            timeout=600,
+        )
     if fallback.is_error or not validate_srt_captions(fallback.text, duration_seconds or 0):
         log.warning("Transcription returned no valid word or segment captions")
         return None
