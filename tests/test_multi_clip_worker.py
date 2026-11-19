@@ -411,3 +411,17 @@ def test_vertical_filter_without_facecam_uses_safe_portrait_fallback():
 
     assert "[base]null" in graph
     assert "[vout]" in graph
+
+
+
+def test_facecam_box_validation_clamps_and_rejects_invalid_boxes():
+    assert live_intelligence.normalise_facecam_box(
+        {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
+    ) == (0.1, 0.2, 0.3, 0.4)
+    assert live_intelligence.normalise_facecam_box(
+        {"x": 0.9, "y": 0.9, "width": 0.4, "height": 0.4}
+    ) == (0.9, 0.9, 0.1, 0.1)
+    assert live_intelligence.normalise_facecam_box(
+        {"x": 0.2, "y": 0.2, "width": 0.02, "height": 0.4}
+    ) is None
+    assert live_intelligence.normalise_facecam_box({"x": "bad"}) is None
