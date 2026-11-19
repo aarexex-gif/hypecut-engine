@@ -303,16 +303,17 @@ def validate_srt_captions(content: str, clip_duration: float) -> bool:
     previous_start = -1.0
     for block in blocks:
         lines = block.splitlines()
-        timing_line = next((line.strip() for line in lines if "-->" in line), None)
-        if timing_line is None:
+        timing_index = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if timing_index is None:
             return False
+        timing_line = lines[timing_index].strip()
         match = timestamp.match(timing_line)
         if not match:
             return False
         start, end = map(seconds, match.groups())
         if start < 0 or end <= start or end > clip_duration + 0.25 or start < previous_start:
             return False
-        if not any(line.strip() for line in lines[lines.index(timing_line) + 1:]):
+        if not any(line.strip() for line in lines[timing_index + 1:]):
             return False
         previous_start = start
     return True
