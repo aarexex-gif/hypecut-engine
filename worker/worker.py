@@ -129,8 +129,9 @@ async def cleanup_failed_job_outputs(client: httpx.AsyncClient, job_id: str, use
 async def set_progress(client: httpx.AsyncClient, job_id: str, status: str, progress: int) -> None:
     await rest_patch(
         client, "clip_jobs", {"id": f"eq.{job_id}"},
-        {"status": status, "progress_percent": progress, "worker_locked_at": "now()",
-         "worker_id": WORKER_ID, "updated_at": "now()"},
+        {"status": status, "progress_percent": progress,
+         "worker_locked_at": datetime.now(timezone.utc).isoformat(),
+         "worker_id": WORKER_ID, "updated_at": datetime.now(timezone.utc).isoformat()},
     )
 
 
