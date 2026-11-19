@@ -174,7 +174,10 @@ def build_vertical_filter(
         + "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=20:10[bg];"
         f"[fgsrc]crop=w=ih*9/16:h=ih:x={crop_x}:y=0,"
-        "scale=1080:1920:flags=lanczos[fg];"
+        "scale=1080:1920:flags=lanczos,"
+        "zoompan=z='1+0.08*(0.5-0.5*cos(2*PI*on/240))':"
+        "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        "d=1:s=1080x1920:fps=30[fg];"
         "[bg][fg]overlay=0:0,setsar=1[base]"
     )
     if facecam_box:
