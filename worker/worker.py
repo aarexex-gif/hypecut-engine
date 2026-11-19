@@ -588,7 +588,7 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
             if semantic:
                 candidates = [(semantic.start_seconds, semantic.end_seconds, semantic.score)]
                 semantic_title = semantic.title
-                semantic_description = (semantic.caption + "\\n\\n" + "; ".join(semantic.reasons)).strip()[:1500]
+                semantic_description = (semantic.caption + "\n\n" + "; ".join(semantic.reasons)).strip()[:1500]
                 semantic_reason = f"Semantic AI highlight: {semantic.category}. " + "; ".join(semantic.reasons)
                 fallback = await asyncio.to_thread(choose_highlights, media, duration, clip_length, 3)
                 for candidate in fallback:
