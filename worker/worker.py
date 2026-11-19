@@ -158,12 +158,24 @@ def build_vertical_filter(
 ) -> str:
     """Compose a portrait gaming short and optionally lift the detected facecam into a clear inset."""
     split = "[0:v]split=3[bgsrc][fgsrc][camsrc];" if facecam_box else "[0:v]split=2[bgsrc][fgsrc];"
+    if facecam_box:
+        x, _, width, _ = facecam_box
+        right_edge = x + width
+        if x < 0.4:
+            crop_x = f"iw*{right_edge:.4f}+(iw*(1-{right_edge:.4f})-ih*9/16)/2"
+        elif right_edge > 0.6:
+            crop_x = f"(iw*{x:.4f}-ih*9/16)/2"
+        else:
+            crop_x = "(iw-ih*9/16)/2"
+    else:
+        crop_x = "(iw-ih*9/16)/2"
     graph = (
         split
         + "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=20:10[bg];"
-        "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]"
+        f"[fgsrc]crop=w=ih*9/16:h=ih:x={crop_x}:y=0,"
+        "scale=1080:1920:flags=lanczos[fg];"
+        "[bg][fg]overlay=0:0,setsar=1[base]"
     )
     if facecam_box:
         x, y, width, height = facecam_box
