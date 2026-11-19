@@ -511,7 +511,7 @@ def test_motion_zoom_expression_caps_number_and_strength_of_pulses(monkeypatch, 
 
     assert expression.startswith("min(1.16,1+")
     assert expression.count("max(0,1-abs(on-") <= 4
-    assert all(float(value) <= 0.14 for value in __import__("re").findall(r"([0-9]+\\.[0-9]+)\\*max", expression))
+    assert all(float(value) <= 0.14 for value in __import__("re").findall(r"([0-9]+\.[0-9]+)\*max", expression))
 
 
 def test_motion_zoom_expression_falls_back_when_ffmpeg_sampling_fails(monkeypatch, tmp_path):
