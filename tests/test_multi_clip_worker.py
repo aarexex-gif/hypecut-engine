@@ -542,3 +542,61 @@ def test_vertical_filter_moves_gameplay_crop_away_from_central_facecam():
     # The left side has slightly more usable width. The right edge is exactly
     # 0.60, which also guards against floating-point boundary misclassification.
     assert "x=iw*0.4200-ih*9/16:y=0" in graph
+
+
+def test_transcribe_window_retries_rate_limit_and_rewinds_audio(monkeypatch, tmp_path):
+    media = tmp_path / "gameplay.mp4"
+    audio_bytes = b"fake-mp3-audio"
+    monkeypatch.setattr(live_intelligence, "OPENAI_API_KEY", "test-key")
+
+    def fake_ffmpeg(command, timeout=300):
+        Path(command[-1]).write_bytes(audio_bytes)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeResponse:
+        def __init__(self, status_code, text=""):
+            self.status_code = status_code
+            self.headers = {"Retry-After": "0.5"}
+            self.text = text
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    class FakeClient:
+        def __init__(self, timeout=300):
+            self.calls = []
+            self.statuses = [429, 200]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            stream = kwargs["files"]["file"][1]
+            self.calls.append(stream.read())
+            status = self.statuses.pop(0)
+            return FakeResponse(status, "gameplay transcript" if status == 200 else "")
+
+    clients = []
+
+    def fake_client_factory(timeout=300):
+        client = FakeClient(timeout)
+        clients.append(client)
+        return client
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(live_intelligence, "_run", fake_ffmpeg)
+    monkeypatch.setattr(live_intelligence.httpx, "AsyncClient", fake_client_factory)
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+
+    transcript = worker.asyncio.run(live_intelligence.transcribe_window(media))
+
+    assert transcript == "gameplay transcript"
+    assert len(clients) == 1
+    assert clients[0].calls == [audio_bytes, audio_bytes]
+    assert not media.with_suffix(".mp3").exists()
