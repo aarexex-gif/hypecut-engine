@@ -289,6 +289,35 @@ async def choose_semantic_highlight(media_path: Path, duration: float, work: Pat
     return best
 
 
+def validate_srt_captions(content: str, clip_duration: float) -> bool:
+    """Validate caption cue syntax, ordering, and bounds before burn-in."""
+    timestamp = re.compile(r"^(\\d{2,}:\\d{2}:\\d{2},\\d{3})\\s+-->\\s+(\\d{2,}:\\d{2}:\\d{2},\\d{3})(?:\\s+.*)?$")
+    def seconds(value: str) -> float:
+        hours, minutes, rest = value.split(":")
+        whole, millis = rest.split(",")
+        return int(hours) * 3600 + int(minutes) * 60 + int(whole) + int(millis) / 1000
+
+    blocks = [block.strip() for block in re.split(r"\\n\\s*\\n", content.strip()) if block.strip()]
+    if not blocks or clip_duration <= 0:
+        return False
+    previous_start = -1.0
+    for block in blocks:
+        lines = block.splitlines()
+        timing_line = next((line.strip() for line in lines if "-->" in line), None)
+        if timing_line is None:
+            return False
+        match = timestamp.match(timing_line)
+        if not match:
+            return False
+        start, end = map(seconds, match.groups())
+        if start < 0 or end <= start or end > clip_duration + 0.25 or start < previous_start:
+            return False
+        if not any(line.strip() for line in lines[lines.index(timing_line) + 1:]):
+            return False
+        previous_start = start
+    return True
+
+
 async def transcribe(
     client: httpx.AsyncClient,
     media_path: Path,
@@ -315,6 +344,9 @@ async def transcribe(
         )
     if response.is_error:
         log.warning("Transcription unavailable: %s", response.status_code)
+        return None
+    if not validate_srt_captions(response.text, duration_seconds or 0):
+        log.warning("Transcription returned invalid or out-of-range caption cues; skipping burn-in")
         return None
     srt = work / f"captions-{suffix}.srt"
     srt.write_text(response.text, encoding="utf-8")
