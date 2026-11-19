@@ -185,7 +185,7 @@ def motion_zoom_expression(path: Path, duration: float) -> str:
         return "1"
     maximum = max(float(np.max(smooth)), 1e-6)
     pulses = [f"{min(0.14, 0.06 + 0.08*float(smooth[p]/maximum)):.4f}*max(0,1-abs(on-{int(round((p+0.5)*15))})/45)" for p in selected]
-    return "1+" + "+".join(pulses)
+    return "min(1.16,1+" + "+".join(pulses) + ")"
 
 
 def build_vertical_filter(
