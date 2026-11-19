@@ -110,18 +110,20 @@ async def upload_file(client: httpx.AsyncClient, bucket: str, path: str, file_pa
 
 async def cleanup_failed_job_outputs(client: httpx.AsyncClient, job_id: str, user_id: str, paths: list[str]) -> None:
     """Remove this failed attempt's visible rows and uploaded objects."""
-    if paths:
-        response = await client.request(
-            "POST", f"{SUPABASE_URL}/storage/v1/object/{OUTPUT_BUCKET}",
-            headers=headers(), json={"prefixes": paths},
-        )
-        response.raise_for_status()
+    # Hide rows first so a storage-delete failure cannot leave broken,
+    # downloadable-looking clips in the user's library.
     response = await client.delete(
         f"{SUPABASE_URL}/rest/v1/clips",
         params={"job_id": f"eq.{job_id}", "user_id": f"eq.{user_id}"},
         headers=headers(),
     )
     response.raise_for_status()
+    if paths:
+        response = await client.request(
+            "POST", f"{SUPABASE_URL}/storage/v1/object/{OUTPUT_BUCKET}",
+            headers=headers(), json={"prefixes": paths},
+        )
+        response.raise_for_status()
 
 
 async def set_progress(client: httpx.AsyncClient, job_id: str, status: str, progress: int) -> None:
