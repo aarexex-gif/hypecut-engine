@@ -291,13 +291,13 @@ async def choose_semantic_highlight(media_path: Path, duration: float, work: Pat
 
 def validate_srt_captions(content: str, clip_duration: float) -> bool:
     """Validate caption cue syntax, ordering, and bounds before burn-in."""
-    timestamp = re.compile(r"^(\\d{2,}:\\d{2}:\\d{2},\\d{3})\\s+-->\\s+(\\d{2,}:\\d{2}:\\d{2},\\d{3})(?:\\s+.*)?$")
+    timestamp = re.compile(r"^(\d{2,}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2,}:\d{2}:\d{2},\d{3})(?:\s+.*)?$")
     def seconds(value: str) -> float:
         hours, minutes, rest = value.split(":")
         whole, millis = rest.split(",")
         return int(hours) * 3600 + int(minutes) * 60 + int(whole) + int(millis) / 1000
 
-    blocks = [block.strip() for block in re.split(r"\\n\\s*\\n", content.strip()) if block.strip()]
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", content.strip()) if block.strip()]
     if not blocks or clip_duration <= 0:
         return False
     previous_start = -1.0
