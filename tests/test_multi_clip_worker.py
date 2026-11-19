@@ -350,3 +350,27 @@ Later.
 Earlier.
 """
     assert not worker.validate_srt_captions(srt, 10)
+
+
+def test_caption_validator_rejects_invalid_minute_or_second_fields():
+    invalid_minute = "1\\n00:61:00,000 --> 00:61:01,000\\nBad timestamp"
+    invalid_second = "1\\n00:00:60,000 --> 00:01:01,000\\nBad timestamp"
+    assert not worker.validate_srt_captions(invalid_minute, 90)
+    assert not worker.validate_srt_captions(invalid_second, 90)
+
+
+def test_caption_validator_requires_unique_numeric_cue_indices():
+    duplicate = """1
+00:00:00,000 --> 00:00:01,000
+First.
+
+1
+00:00:01,100 --> 00:00:02,000
+Duplicate index.
+"""
+    malformed_index = """cue
+00:00:00,000 --> 00:00:01,000
+No numeric index.
+"""
+    assert not worker.validate_srt_captions(duplicate, 3)
+    assert not worker.validate_srt_captions(malformed_index, 3)
