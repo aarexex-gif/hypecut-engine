@@ -143,6 +143,66 @@ def _keyframe_data_urls(media: Path, duration: float) -> list[str]:
     return urls
 
 
+def normalise_facecam_box(value: Any) -> tuple[float, float, float, float] | None:
+    """Validate a model-detected facecam box in normalised x,y,width,height coordinates."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        x, y, width, height = (float(value[k]) for k in ("x", "y", "width", "height"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(np.isfinite(v) for v in (x, y, width, height)):
+        return None
+    x, y = max(0.0, min(1.0, x)), max(0.0, min(1.0, y))
+    width, height = min(width, 1.0 - x), min(height, 1.0 - y)
+    if width < 0.08 or height < 0.08 or width > 0.85 or height > 0.85:
+        return None
+    return (round(x, 4), round(y, 4), round(width, 4), round(height, 4))
+
+
+async def detect_facecam_region(media: Path) -> tuple[float, float, float, float] | None:
+    """Ask vision to locate a persistent streamer facecam panel; fail safely if absent."""
+    if not OPENAI_API_KEY:
+        return None
+    duration_result = _run([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(media)
+    ])
+    duration = max(0.0, float(duration_result.stdout.strip() or 0))
+    if duration < 2:
+        return None
+    frames = await __import__("asyncio").to_thread(_keyframe_data_urls, media, duration)
+    if not frames:
+        return None
+    content = [{
+        "type": "text",
+        "text": (
+            "Find the streamer webcam/facecam panel, if one is clearly visible, in these "
+            "chronological frames from the same gaming video. Return JSON only: "
+            "{\"found\":true,\"x\":0.0,\"y\":0.0,\"width\":0.2,\"height\":0.3}. "
+            "Coordinates are normalised 0..1 relative to the full source frame, with x,y "
+            "at the top-left. Prefer the persistent facecam panel, not an in-game character. "
+            "If absent or uncertain return {\"found\":false}."
+        )
+    }]
+    content.extend({"type": "image_url", "image_url": {"url": url, "detail": "high"}} for url in frames)
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await _post_with_retries(
+            client, "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": TEXT_MODEL, "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "You locate visible webcam panels precisely. Never guess."},
+                    {"role": "user", "content": content},
+                ],
+            },
+        )
+    result = json.loads(response.json()["choices"][0]["message"]["content"])
+    return normalise_facecam_box(result) if result.get("found") is True else None
+
+
 async def rank_window(media: Path, window_start: float = 0.0) -> HighlightCandidate | None:
     """Rank a 30–60s live window using transcript semantics plus AV signals."""
     duration_result = _run([
