@@ -169,9 +169,9 @@ def build_vertical_filter(
         graph += (
             f";[0:v]crop=w=iw*{width:.4f}:h=ih*{height:.4f}:"
             f"x=iw*{x:.4f}:y=ih*{y:.4f},"
-            "scale=420:-2:flags=lanczos,setsar=1[cam];"
-            "[base][cam]overlay=x=W-w-36:y=72:eval=init:shortest=1,"
-            "drawbox=x=W-w-36:y=72:w=iw:h=ih:color=white@0.9:t=3"
+            "scale=420:-2:flags=lanczos,"
+            "drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3,setsar=1[cam];"
+            "[base][cam]overlay=x=W-w-36:y=72:eval=init:shortest=1"
         )
     else:
         graph += ";[base]null"
