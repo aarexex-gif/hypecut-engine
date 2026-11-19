@@ -539,6 +539,6 @@ def test_vertical_filter_moves_gameplay_crop_away_from_central_facecam():
         facecam_box=(0.42, 0.08, 0.18, 0.36)
     )
 
-    # There is more room to the right of this panel, so gameplay starts
-    # immediately after the detected facecam's right edge.
-    assert "x=iw*0.6000:y=0" in graph
+    # The left side has slightly more usable width. The right edge is exactly
+    # 0.60, which also guards against floating-point boundary misclassification.
+    assert "x=iw*0.4200-ih*9/16:y=0" in graph
