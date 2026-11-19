@@ -119,8 +119,8 @@ async def cleanup_failed_job_outputs(client: httpx.AsyncClient, job_id: str, use
     )
     response.raise_for_status()
     if paths:
-        response = await client.request(
-            "POST", f"{SUPABASE_URL}/storage/v1/object/{OUTPUT_BUCKET}",
+        response = await client.delete(
+            f"{SUPABASE_URL}/storage/v1/object/{OUTPUT_BUCKET}",
             headers=headers(), json={"prefixes": paths},
         )
         response.raise_for_status()
