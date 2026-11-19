@@ -400,6 +400,7 @@ def test_vertical_filter_adds_detected_facecam_inset():
         facecam_box=(0.02, 0.08, 0.24, 0.42)
     )
 
+    assert "crop=w=ih*9/16:h=ih:x=iw*0.2600+(iw*(1-0.2600)-ih*9/16)/2:y=0" in graph
     assert "crop=w=iw*0.2400:h=ih*0.4200:x=iw*0.0200:y=ih*0.0800" in graph
     assert "scale=420:-2:flags=lanczos" in graph
     assert "overlay=x=W-w-36:y=72" in graph
