@@ -245,3 +245,69 @@ def test_model_api_does_not_retry_client_errors():
         assert "HTTP 400" in str(exc)
 
     assert client.calls == 1
+
+
+def test_failed_job_cleanup_removes_uploaded_objects_and_clip_rows(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        async def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return FakeResponse()
+
+        async def delete(self, url, **kwargs):
+            calls.append(("DELETE", url, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(worker, "SUPABASE_URL", "https://project.example")
+    monkeypatch.setattr(worker, "OUTPUT_BUCKET", "hypecut-clips")
+    monkeypatch.setattr(worker, "headers", lambda: {"Authorization": "Bearer test"})
+
+    worker.asyncio.run(
+        worker.cleanup_failed_job_outputs(
+            FakeClient(), "job-123", "user-456",
+            ["user-456/job-123/1.mp4", "user-456/job-123/2.mp4"],
+        )
+    )
+
+    assert calls[0][0] == "POST"
+    assert calls[0][1].endswith("/storage/v1/object/hypecut-clips")
+    assert calls[0][2]["json"]["prefixes"] == [
+        "user-456/job-123/1.mp4", "user-456/job-123/2.mp4"
+    ]
+    assert calls[1][0] == "DELETE"
+    assert calls[1][1].endswith("/rest/v1/clips")
+    assert calls[1][2]["params"] == {
+        "job_id": "eq.job-123", "user_id": "eq.user-456"
+    }
+
+
+def test_failed_job_cleanup_skips_storage_request_when_no_uploads(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        async def request(self, *args, **kwargs):
+            calls.append(("request", args, kwargs))
+            return FakeResponse()
+
+        async def delete(self, *args, **kwargs):
+            calls.append(("delete", args, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(worker, "SUPABASE_URL", "https://project.example")
+    monkeypatch.setattr(worker, "headers", lambda: {})
+
+    worker.asyncio.run(
+        worker.cleanup_failed_job_outputs(FakeClient(), "job-123", "user-456", [])
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == "delete"
