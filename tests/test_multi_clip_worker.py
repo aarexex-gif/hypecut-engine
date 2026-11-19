@@ -377,13 +377,13 @@ No numeric index.
 
 
 
-def test_vertical_filter_preserves_full_landscape_frame_and_blurs_fill():
+def test_vertical_filter_crops_gameplay_to_portrait_and_blurs_background():
     graph = worker.build_vertical_filter()
 
     assert "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase" in graph
     assert "boxblur=20:10" in graph
-    assert "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease" in graph
-    assert "[bg][fg]overlay=(W-w)/2:(H-h)/2" in graph
+    assert "[fgsrc]crop=w=ih*9/16:h=ih:x=(iw-ih*9/16)/2:y=0" in graph
+    assert "[bg][fg]overlay=0:0" in graph
     assert graph.endswith("[vout]")
 
 
