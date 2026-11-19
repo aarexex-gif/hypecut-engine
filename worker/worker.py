@@ -152,6 +152,21 @@ def media_duration(path: Path) -> float:
     return max(0.0, float(output.strip()))
 
 
+def build_vertical_filter(captions_path: str | None = None) -> str:
+    """Fit the complete landscape frame inside a 9:16 canvas with a blurred fill."""
+    graph = (
+        "[0:v]split=2[bgsrc][fgsrc];"
+        "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=20:10[bg];"
+        "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
+    )
+    if captions_path:
+        escaped = captions_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        graph += f",subtitles='{escaped}'"
+    return graph + "[vout]"
+
+
 def validate_rendered_clip(path: Path, max_av_offset: float = 0.15, max_stream_duration_delta: float = 0.75) -> dict[str, Any]:
     """Reject malformed renders and measurable audio/video timestamp drift."""
     proc = subprocess.run(
@@ -433,12 +448,9 @@ async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
                     "ffmpeg", "-y",
                     "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
                     "-ss", f"{start:.3f}", "-i", str(media),
-                    "-t", f"{end-start:.3f}", "-map", "0:v:0", "-map", "0:a?",
-                    "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+                    "-t", f"{end-start:.3f}", "-filter_complex", build_vertical_filter(str(captions) if captions else None),
+                    "-map", "[vout]", "-map", "0:a?",
                 ]
-                if captions:
-                    escaped = str(captions).replace("\\\\", "\\\\\\\\").replace(":", "\\\\:").replace("'", "\\\\'")
-                    args[-1] += f",subtitles='{escaped}'"
                 args += ["-c:v", "libx264", "-threads", "2", "-x264-params", "threads=2",
                          "-preset", "veryfast", "-crf", "23",
                          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output)]
