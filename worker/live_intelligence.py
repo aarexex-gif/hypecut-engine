@@ -84,15 +84,27 @@ async def transcribe_window(media: Path) -> str:
     _run(["ffmpeg", "-y", "-i", str(media), "-vn", "-ac", "1",
           "-b:a", "64k", str(audio)], timeout=180)
     try:
+        # Reusable bytes let the shared retry helper safely replay the multipart
+        # request after a transient 429/5xx response.
+        audio_bytes = audio.read_bytes()
         async with httpx.AsyncClient(timeout=300) as client:
-            with audio.open("rb") as stream:
-                response = await client.post(
+            try:
+                response = await _post_with_retries(
+                    client,
                     "https://api.openai.com/v1/audio/transcriptions",
+                    attempts=3,
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                     data={"model": "whisper-1", "response_format": "text"},
-                    files={"file": (audio.name, stream, "audio/mpeg")},
+                    files={"file": (audio.name, audio_bytes, "audio/mpeg")},
                 )
-            response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    # Transcription is an enhancement, not a reason to lose the
+                    # entire job. Let semantic ranking skip this window and allow
+                    # the audio-energy fallback to continue.
+                    log.warning("Window transcription rate-limited; skipping transcript for %s", media.name)
+                    return ""
+                raise
             return response.text.strip()
     finally:
         audio.unlink(missing_ok=True)
