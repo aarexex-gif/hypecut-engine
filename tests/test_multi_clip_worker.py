@@ -531,3 +531,14 @@ def test_facecam_inset_crop_avoids_left_and_right_panels():
 
     assert "x=iw*0.2600+" in left
     assert "x=(iw*0.7400-ih*9/16)/2" in right
+
+
+
+def test_vertical_filter_moves_gameplay_crop_away_from_central_facecam():
+    graph = worker.build_vertical_filter(
+        facecam_box=(0.42, 0.08, 0.18, 0.36)
+    )
+
+    # There is more room to the right of this panel, so gameplay starts
+    # immediately after the detected facecam's right edge.
+    assert "x=iw*0.6000:y=0" in graph
