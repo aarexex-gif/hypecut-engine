@@ -446,7 +446,7 @@ def test_word_timestamps_create_karaoke_ass_captions():
     assert r"{\\k39}is" in ass
     assert "Dialogue: 0,0:00:00.20,0:00:01.30" in ass
     assert "Dialogue: 0,0:00:02.00,0:00:02.40" in ass
-    assert "\\\\n" not in ass
+    assert r"\\n" not in ass
 
 
 def test_word_timestamps_reject_invalid_and_out_of_range_words():
