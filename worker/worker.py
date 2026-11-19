@@ -439,7 +439,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f"Dialogue: 0,{_ass_timestamp(start)},{_ass_timestamp(end)},"
             f"Default,,0,0,0,,{' '.join(parts)}"
         )
-    return header + "\\n".join(events) + "\\n"
+    return header + "\n".join(events) + "\n"
 
 
 async def transcribe(
