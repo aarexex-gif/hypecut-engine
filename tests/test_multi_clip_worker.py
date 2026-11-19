@@ -374,3 +374,21 @@ No numeric index.
 """
     assert not worker.validate_srt_captions(duplicate, 3)
     assert not worker.validate_srt_captions(malformed_index, 3)
+
+
+
+def test_vertical_filter_preserves_full_landscape_frame_and_blurs_fill():
+    graph = worker.build_vertical_filter()
+
+    assert "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase" in graph
+    assert "boxblur=20:10" in graph
+    assert "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease" in graph
+    assert "[bg][fg]overlay=(W-w)/2:(H-h)/2" in graph
+    assert graph.endswith("[vout]")
+
+
+def test_vertical_filter_adds_captions_to_composited_output():
+    graph = worker.build_vertical_filter("/tmp/captions.srt")
+
+    assert "subtitles='/tmp/captions.srt'" in graph
+    assert graph.endswith("[vout]")
