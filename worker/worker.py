@@ -374,6 +374,74 @@ def validate_srt_captions(content: str, clip_duration: float) -> bool:
     return True
 
 
+def _ass_timestamp(seconds: float) -> str:
+    value = max(0, int(round(seconds * 100)))
+    hours, remainder = divmod(value, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    whole, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{whole:02d}.{centiseconds:02d}"
+
+
+def word_timestamps_to_ass(payload: dict[str, Any], clip_duration: float) -> str | None:
+    """Create short karaoke-style caption phrases from Whisper word timestamps."""
+    raw_words = payload.get("words")
+    if not isinstance(raw_words, list) or not raw_words:
+        return None
+    words: list[tuple[float, float, str]] = []
+    for item in raw_words:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start, end = float(item["start"]), float(item["end"])
+            word = str(item.get("word") or "").strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        word = re.sub(r"[{}\\\\]", "", word)
+        if not word or start < 0 or end <= start or end > clip_duration + 0.25:
+            continue
+        words.append((start, end, word))
+    if not words:
+        return None
+    words.sort(key=lambda item: item[0])
+    groups: list[list[tuple[float, float, str]]] = []
+    for word in words:
+        if (
+            not groups
+            or len(groups[-1]) >= 5
+            or word[0] - groups[-1][-1][1] > 0.65
+            or word[0] - groups[-1][0][0] > 2.8
+        ):
+            groups.append([word])
+        else:
+            groups[-1].append(word)
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,62,&H00FFFFFF,&H0000D7FF,&H00101010,&H80000000,-1,0,1,5,2,2,80,80,260,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    events = []
+    for group in groups:
+        start, end = group[0][0], group[-1][1]
+        parts = []
+        for word_start, word_end, word in group:
+            duration_cs = max(1, int(round((word_end - word_start) * 100)))
+            parts.append(f"{{\\\\k{duration_cs}}}{word}")
+        events.append(
+            f"Dialogue: 0,{_ass_timestamp(start)},{_ass_timestamp(end)},"
+            f"Default,,0,0,0,,{' '.join(parts)}"
+        )
+    return header + "\\n".join(events) + "\\n"
+
+
 async def transcribe(
     client: httpx.AsyncClient,
     media_path: Path,
@@ -394,18 +462,39 @@ async def transcribe(
         response = await client.post(
             "https://api.openai.com/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            data={"model": "whisper-1", "response_format": "srt"},
+            data={
+                "model": "whisper-1",
+                "response_format": "verbose_json",
+                "timestamp_granularities[]": "word",
+            },
             files={"file": (audio.name, stream, "audio/mpeg")},
             timeout=600,
         )
     if response.is_error:
         log.warning("Transcription unavailable: %s", response.status_code)
         return None
-    if not validate_srt_captions(response.text, duration_seconds or 0):
-        log.warning("Transcription returned invalid or out-of-range caption cues; skipping burn-in")
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    ass_content = word_timestamps_to_ass(payload, duration_seconds or 0)
+    if ass_content:
+        captions = work / f"captions-{suffix}.ass"
+        captions.write_text(ass_content, encoding="utf-8")
+        return captions
+    # Keep a conservative segment-caption fallback if word timestamps are absent.
+    fallback = await client.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        data={"model": "whisper-1", "response_format": "srt"},
+        files={"file": (audio.name, audio.open("rb"), "audio/mpeg")},
+        timeout=600,
+    )
+    if fallback.is_error or not validate_srt_captions(fallback.text, duration_seconds or 0):
+        log.warning("Transcription returned no valid word or segment captions")
         return None
     srt = work / f"captions-{suffix}.srt"
-    srt.write_text(response.text, encoding="utf-8")
+    srt.write_text(fallback.text, encoding="utf-8")
     return srt
 
 async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
