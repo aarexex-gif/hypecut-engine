@@ -51,7 +51,7 @@ def test_transcribe_retries_via_shared_retry_helper_and_writes_karaoke(monkeypat
 
     assert output is not None
     assert output.suffix == ".ass"
-    assert r"{\\k30}Hello" in output.read_text(encoding="utf-8")
+    assert r"{\k30}Hello" in output.read_text(encoding="utf-8")
     assert len(calls) == 1
     assert calls[0][1] == 3
     assert calls[0][2]["files"]["file"][1] == b"synthetic-audio"
