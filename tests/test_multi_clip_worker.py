@@ -460,3 +460,37 @@ def test_word_timestamps_reject_invalid_and_out_of_range_words():
         ]
     }
     assert worker.word_timestamps_to_ass(payload, 4.0) is None
+
+
+def test_motion_zoom_expression_responds_to_visual_activity(monkeypatch, tmp_path):
+    frames = np.zeros((24, 90, 160), dtype=np.uint8)
+    for index in range(7, 11):
+        frames[index, :, :] = 220
+    raw = frames.tobytes()
+    monkeypatch.setattr(
+        worker.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=raw),
+    )
+
+    expression = worker.motion_zoom_expression(tmp_path / "motion.mp4", 12)
+
+    assert expression.startswith("min(1.16,1+")
+    assert "abs(on-" in expression
+
+
+def test_motion_zoom_expression_uses_neutral_zoom_for_static_video(monkeypatch, tmp_path):
+    frames = np.full((12, 90, 160), 80, dtype=np.uint8)
+    monkeypatch.setattr(
+        worker.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=frames.tobytes()),
+    )
+
+    assert worker.motion_zoom_expression(tmp_path / "static.mp4", 6) == "1"
+
+
+def test_vertical_filter_accepts_activity_driven_zoom_expression():
+    graph = worker.build_vertical_filter(
+        zoom_expression="min(1.16,1+0.12*max(0,1-abs(on-90)/45))"
+    )
+
+    assert "zoompan=z='min(1.16,1+0.12*max(0,1-abs(on-90)/45))'" in graph
