@@ -16,7 +16,7 @@ import httpx
 import numpy as np
 
 from live_pipeline import process_live_sessions
-from live_intelligence import detect_facecam_region, rank_window
+from live_intelligence import _post_with_retries, detect_facecam_region, rank_window
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("hypecut-worker")
@@ -499,6 +499,7 @@ async def transcribe(
     start_seconds: float = 0,
     duration_seconds: float | None = None,
 ) -> Path | None:
+    """Create truthful captions, retry transient API limits, and clean temporary audio."""
     if not OPENAI_API_KEY:
         return None
     suffix = str(int(start_seconds * 1000))
@@ -507,46 +508,66 @@ async def transcribe(
     if duration_seconds is not None:
         args += ["-t", f"{duration_seconds:.3f}"]
     args += ["-vn", "-ac", "1", "-b:a", "64k", str(audio)]
-    await asyncio.to_thread(run_ffmpeg, args)
-    with audio.open("rb") as stream:
-        response = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            data={
+    try:
+        await asyncio.to_thread(run_ffmpeg, args)
+        audio_bytes = await asyncio.to_thread(audio.read_bytes)
+        if not audio_bytes:
+            log.warning("Transcription skipped because extracted audio is empty")
+            return None
+
+        request_headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        async def request_transcription(data: dict[str, str]):
+            return await _post_with_retries(
+                client,
+                "https://api.openai.com/v1/audio/transcriptions",
+                attempts=3,
+                headers=request_headers,
+                data=data,
+                files={"file": (audio.name, audio_bytes, "audio/mpeg")},
+                timeout=600,
+            )
+
+        try:
+            response = await request_transcription({
                 "model": "whisper-1",
                 "response_format": "verbose_json",
                 "timestamp_granularities[]": "word",
-            },
-            files={"file": (audio.name, stream, "audio/mpeg")},
-            timeout=600,
-        )
-    if response.is_error:
-        log.warning("Transcription unavailable: %s", response.status_code)
-        return None
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    ass_content = word_timestamps_to_ass(payload, duration_seconds or 0)
-    if ass_content:
-        captions = work / f"captions-{suffix}.ass"
-        captions.write_text(ass_content, encoding="utf-8")
-        return captions
-    # Keep a conservative segment-caption fallback if word timestamps are absent.
-    with audio.open("rb") as fallback_stream:
-        fallback = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            data={"model": "whisper-1", "response_format": "srt"},
-            files={"file": (audio.name, fallback_stream, "audio/mpeg")},
-            timeout=600,
-        )
-    if fallback.is_error or not validate_srt_captions(fallback.text, duration_seconds or 0):
-        log.warning("Transcription returned no valid word or segment captions")
-        return None
-    srt = work / f"captions-{suffix}.srt"
-    srt.write_text(fallback.text, encoding="utf-8")
-    return srt
+            })
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                log.warning("Caption transcription remained rate-limited after retries; leaving captions disabled")
+                return None
+            raise
+        try:
+            payload = response.json()
+        except (ValueError, AttributeError):
+            payload = {}
+        ass_content = word_timestamps_to_ass(payload, duration_seconds or 0)
+        if ass_content:
+            captions = work / f"captions-{suffix}.ass"
+            captions.write_text(ass_content, encoding="utf-8")
+            return captions
+
+        # Some successful Whisper responses omit word timestamps. Retry a
+        # segment-level SRT request, but never fabricate text when that fails.
+        try:
+            fallback = await request_transcription({
+                "model": "whisper-1",
+                "response_format": "srt",
+            })
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                log.warning("Segment-caption fallback remained rate-limited; leaving captions disabled")
+                return None
+            raise
+        if not validate_srt_captions(fallback.text, duration_seconds or 0):
+            log.warning("Transcription returned no valid word or segment captions")
+            return None
+        srt = work / f"captions-{suffix}.srt"
+        srt.write_text(fallback.text, encoding="utf-8")
+        return srt
+    finally:
+        audio.unlink(missing_ok=True)
 
 async def process_job(client: httpx.AsyncClient, job: dict[str, Any]) -> None:
     job_id = job["id"]
